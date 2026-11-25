@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     temperature: float = 0.0
     log_level: str = "INFO"
     models_config_path: Path = Path("config/models.toml")
+    database_path: str = "data/gateway.db"
 
 
 @lru_cache
