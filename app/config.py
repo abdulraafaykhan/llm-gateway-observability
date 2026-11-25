@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -11,7 +12,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    groq_api_key: str
+    groq_api_key: str = ""
     default_model_name: str = "big"
     request_timeout_seconds: float = 30.0
     max_output_tokens: int = 512
@@ -19,6 +20,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     models_config_path: Path = Path("config/models.toml")
     database_path: str = "data/gateway.db"
+    provider_mode: Literal["real", "fake"] = "real"
+    fake_config_path: str = "config/fake.toml"
+    fake_seed: int = 42
 
 
 @lru_cache

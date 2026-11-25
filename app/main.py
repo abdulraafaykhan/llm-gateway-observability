@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import get_settings
 from app.controllers import chat_controller, health_controller, request_log_controller
-from app.dependencies import get_model_registry, get_request_repository
+from app.dependencies import get_llm_provider, get_model_registry, get_request_repository
 from app.providers.base import ProviderError
 from app.services.model_registry import UnknownModelError
 from app.views.error_view import ErrorDetail, ErrorResponse
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Configure logging, load the model registry, and initialize storage once at startup."""
+    """Configure logging, build the registry and provider, and initialize storage at startup."""
     settings = get_settings()
     logging.basicConfig(
         level=settings.log_level.upper(),
@@ -27,6 +27,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     registry = get_model_registry()
     logger.info("Loaded models: %s", ", ".join(registry.names()))
+    get_llm_provider()
+    if settings.provider_mode == "fake":
+        logger.warning("FAKE MODE: answers and timings are simulated")
     await get_request_repository().initialize()
     logger.info("Request log database ready: %s", settings.database_path)
     yield

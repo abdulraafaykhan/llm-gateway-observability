@@ -1,0 +1,23 @@
+[fake.big]
+base_latency_ms = 300
+ms_per_output_token = 3.0
+jitter_percent = 15
+slow_outlier_probability = 0.02
+slow_outlier_multiplier = 4.0
+error_probability = 0.005
+truncate_probability = 0.01
+min_output_tokens = 80
+max_output_tokens = 900
+max_concurrent_requests = 8
+
+[fake.small]
+base_latency_ms = 150
+ms_per_output_token = 1.2
+jitter_percent = 15
+slow_outlier_probability = 0.02
+slow_outlier_multiplier = 4.0
+error_probability = 0.005
+truncate_probability = 0.01
+min_output_tokens = 60
+max_output_tokens = 700
+max_concurrent_requests = 24

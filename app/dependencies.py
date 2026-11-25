@@ -8,10 +8,12 @@ from fastapi import Depends
 
 from app.config import Settings, get_settings
 from app.providers.base import LLMProvider
+from app.providers.fake_provider import FakeProvider
 from app.providers.groq_provider import GroqProvider
 from app.repositories.base import RequestRepository
 from app.repositories.sqlite_repository import SqliteRequestRepository
 from app.services.chat_service import ChatService
+from app.services.fake_profiles import load_fake_profiles
 from app.services.model_registry import ModelRegistry
 
 
@@ -23,8 +25,15 @@ def get_model_registry() -> ModelRegistry:
 
 @lru_cache
 def get_llm_provider() -> LLMProvider:
-    """Return the Groq provider, built once from settings."""
+    """Return the provider for PROVIDER_MODE (fake or Groq), built once from settings."""
     settings = get_settings()
+    if settings.provider_mode == "fake":
+        return FakeProvider(
+            profiles=load_fake_profiles(settings.fake_config_path),
+            seed=settings.fake_seed,
+        )
+    if not settings.groq_api_key:
+        raise ValueError("GROQ_API_KEY is required when PROVIDER_MODE=real")
     return GroqProvider(
         api_key=settings.groq_api_key,
         timeout_seconds=settings.request_timeout_seconds,

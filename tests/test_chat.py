@@ -1,19 +1,28 @@
 """Tests for POST /v1/chat and the request log (no network, no API key)."""
 
+import asyncio
+import time
 from pathlib import Path
+from typing import Any
 
 import httpx
+import pytest
 
 from app.dependencies import get_chat_service
 from app.main import create_app
 from app.models.completion import CompletionResult, Message
+from app.models.fake_profile import FakeProfile
 from app.models.model_spec import ModelSpec
 from app.models.request_record import RequestRecord
+from app.providers import fake_provider
 from app.providers.base import LLMProvider, ProviderError
 from app.repositories.base import RequestRepository
 from app.repositories.sqlite_repository import SqliteRequestRepository
 from app.services.chat_service import ChatService
+from app.services.load_plan import build_schedule
 from app.services.model_registry import ModelRegistry
+from app.services.stats_service import StatsService, compute_group_stats, percentile
+from app.views.stats_text_view import render_stats_report
 
 MODELS_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "models.toml"
 VALID_BODY = {"messages": [{"role": "user", "content": "What is the capital of France?"}]}
@@ -59,6 +68,12 @@ class InMemoryRequestRepository(RequestRepository):
         """Return up to limit records, newest first."""
         return list(reversed(self.records))[:limit]
 
+    async def list_all(self, since: str | None = None) -> list[RequestRecord]:
+        """Return all records, or those created at or after since, in insertion order."""
+        if since is None:
+            return list(self.records)
+        return [record for record in self.records if record.created_at >= since]
+
 
 def build_client(
     provider: LLMProvider,
@@ -83,22 +98,24 @@ def build_client(
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
 
 
-def make_record(created_at: str, question: str) -> RequestRecord:
-    """Build a successful record for repository tests."""
-    return RequestRecord(
-        created_at=created_at,
-        model_name="big",
-        model_id="test-big-model",
-        question=question,
-        answer="Paris",
-        status="ok",
-        error_type=None,
-        error_message=None,
-        input_tokens=12,
-        output_tokens=3,
-        latency_ms=150.5,
-        cost_usd=0.0000105,
-    )
+def make_record(**changes: Any) -> RequestRecord:
+    """Build a successful record for tests; keyword arguments replace the defaults."""
+    fields: dict[str, Any] = {
+        "created_at": "2026-11-25T10:00:00+00:00",
+        "model_name": "big",
+        "model_id": "test-big-model",
+        "question": "What is the capital of France?",
+        "answer": "Paris",
+        "status": "ok",
+        "error_type": None,
+        "error_message": None,
+        "input_tokens": 12,
+        "output_tokens": 3,
+        "latency_ms": 150.5,
+        "cost_usd": 0.0000105,
+    }
+    fields.update(changes)
+    return RequestRecord(**fields)
 
 
 async def test_chat_returns_answer_with_all_fields() -> None:
@@ -201,9 +218,181 @@ async def test_sqlite_repository_round_trip(tmp_path: Path) -> None:
     """SQLite stores records and lists them newest first."""
     repository = SqliteRequestRepository(tmp_path / "data" / "gateway.db")
     await repository.initialize()
-    await repository.add(make_record("2026-11-25T10:00:00+00:00", "first"))
-    await repository.add(make_record("2026-11-25T10:00:01+00:00", "second"))
+    await repository.add(make_record(created_at="2026-11-25T10:00:00+00:00", question="first"))
+    await repository.add(make_record(created_at="2026-11-25T10:00:01+00:00", question="second"))
     records = await repository.list_recent(10)
     assert [record.question for record in records] == ["second", "first"]
     assert all(record.id is not None for record in records)
     assert records[0].cost_usd == 0.0000105
+
+
+def test_percentile_uses_nearest_rank() -> None:
+    """Nearest-rank percentiles on 1..100 (shuffled), a single value, and an empty list."""
+    values = [float(value) for value in range(100, 0, -1)]
+    values[10], values[60] = values[60], values[10]
+    assert percentile(values, 50) == 50.0
+    assert percentile(values, 95) == 95.0
+    assert percentile(values, 99) == 99.0
+    assert percentile(values, 100) == 100.0
+    assert all(percentile([7.0], pct) == 7.0 for pct in (0, 50, 95, 99, 100))
+    with pytest.raises(ValueError):
+        percentile([], 50)
+
+
+def test_compute_group_stats_counts_cost_and_answered_only_latency() -> None:
+    """Counts, sums, and cost cover all rows; latency uses answered rows only."""
+    records = [
+        make_record(
+            model_name="big", input_tokens=10, output_tokens=100, latency_ms=100.0, cost_usd=0.001
+        ),
+        make_record(
+            model_name="big",
+            status="truncated",
+            input_tokens=20,
+            output_tokens=200,
+            latency_ms=300.0,
+            cost_usd=0.002,
+        ),
+        make_record(
+            model_name="big",
+            status="error",
+            answer=None,
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=99999.0,
+            cost_usd=0.0,
+        ),
+        make_record(
+            model_name="small", input_tokens=5, output_tokens=50, latency_ms=200.0, cost_usd=0.0005
+        ),
+        make_record(
+            model_name="small", input_tokens=5, output_tokens=50, latency_ms=400.0, cost_usd=0.0005
+        ),
+        make_record(
+            model_name="small",
+            status="error",
+            answer=None,
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=88888.0,
+            cost_usd=0.0,
+        ),
+    ]
+    stats = compute_group_stats(records)
+    assert (stats.requests, stats.answered, stats.truncated, stats.errors) == (6, 4, 1, 2)
+    assert stats.error_rate_percent == pytest.approx(2 / 6 * 100)
+    assert (stats.input_tokens, stats.output_tokens) == (40, 400)
+    assert stats.total_cost_usd == pytest.approx(0.004)
+    assert stats.cost_per_1000_answered_usd == pytest.approx(1.0)
+    assert stats.latency is not None
+    assert stats.latency.count == 4
+    assert stats.latency.avg_ms == pytest.approx(250.0)
+    assert (stats.latency.p50_ms, stats.latency.p95_ms) == (200.0, 400.0)
+    assert stats.latency.max_ms == 400.0
+
+
+async def test_stats_service_splits_by_model_and_handles_empty() -> None:
+    """The report splits records by model with sorted keys; no records means requests == 0."""
+    repository = InMemoryRequestRepository()
+    for model_name in ("small", "big", "small"):
+        await repository.add(make_record(model_name=model_name))
+    report = await StatsService(repository).build_report(since=None)
+    assert report.overall.requests == 3
+    assert list(report.by_model) == ["big", "small"]
+    assert report.by_model["big"].requests == 1
+    assert report.by_model["small"].requests == 2
+
+    empty_report = await StatsService(InMemoryRequestRepository()).build_report(since=None)
+    assert empty_report.overall.requests == 0
+    assert render_stats_report(empty_report) == "No requests found."
+
+
+async def test_sqlite_list_all_filters_by_since(tmp_path: Path) -> None:
+    """list_all returns every row in id order, or only rows at or after since."""
+    repository = SqliteRequestRepository(tmp_path / "gateway.db")
+    await repository.initialize()
+    created_times = [
+        "2026-11-25T10:00:00+00:00",
+        "2026-11-25T10:05:00+00:00",
+        "2026-11-25T10:10:00+00:00",
+    ]
+    for index, created_at in enumerate(created_times):
+        await repository.add(make_record(created_at=created_at, question=f"q{index}"))
+    all_records = await repository.list_all()
+    assert [record.question for record in all_records] == ["q0", "q1", "q2"]
+    assert [record.id for record in all_records] == sorted(record.id for record in all_records)
+    recent_records = await repository.list_all(since=created_times[1])
+    assert [record.question for record in recent_records] == ["q1", "q2"]
+
+
+FAKE_MODEL_SPEC = ModelSpec(
+    name="big",
+    provider="fake",
+    model_id="fake-big",
+    input_price_per_million_tokens=0.0,
+    output_price_per_million_tokens=0.0,
+)
+FAKE_MESSAGES = [Message(role="user", content="What is the capital of France?")]
+
+
+def make_fake_provider(seed: int = 42, **changes: Any) -> fake_provider.FakeProvider:
+    """Build the simulated provider with one tiny-latency 'big' profile; kwargs override it."""
+    fields: dict[str, Any] = {
+        "base_latency_ms": 1,
+        "ms_per_output_token": 0.0,
+        "jitter_percent": 0,
+        "slow_outlier_probability": 0.0,
+        "slow_outlier_multiplier": 1.0,
+        "error_probability": 0.0,
+        "truncate_probability": 0.0,
+        "min_output_tokens": 80,
+        "max_output_tokens": 900,
+        "max_concurrent_requests": 8,
+    }
+    fields.update(changes)
+    return fake_provider.FakeProvider(profiles={"big": FakeProfile(**fields)}, seed=seed)
+
+
+async def test_fake_provider_is_repeatable_for_a_seed() -> None:
+    """The same seed gives the same 10 results; a different seed gives a different sequence."""
+
+    async def run_ten(seed: int) -> list[tuple[int, bool]]:
+        """Return (output_tokens, truncated) for 10 calls in order."""
+        provider = make_fake_provider(seed, jitter_percent=15, truncate_probability=0.3)
+        results = [await provider.complete(FAKE_MODEL_SPEC, FAKE_MESSAGES) for _ in range(10)]
+        return [(result.output_tokens, result.truncated) for result in results]
+
+    assert await run_ten(7) == await run_ten(7)
+    assert await run_ten(7) != await run_ten(8)
+
+
+async def test_fake_provider_queues_when_busy() -> None:
+    """With 2 slots and 50 ms per call, 6 parallel calls take three waves (>= 0.13 s)."""
+    provider = make_fake_provider(base_latency_ms=50, max_concurrent_requests=2)
+    started = time.perf_counter()
+    await asyncio.gather(*(provider.complete(FAKE_MODEL_SPEC, FAKE_MESSAGES) for _ in range(6)))
+    assert time.perf_counter() - started >= 0.13
+
+
+async def test_fake_provider_fails_and_cuts_off_when_told_to() -> None:
+    """error_probability 1.0 raises ProviderError; truncate_probability 1.0 cuts the answer off."""
+    with pytest.raises(ProviderError):
+        await make_fake_provider(error_probability=1.0).complete(FAKE_MODEL_SPEC, FAKE_MESSAGES)
+    result = await make_fake_provider(truncate_probability=1.0).complete(
+        FAKE_MODEL_SPEC, FAKE_MESSAGES
+    )
+    assert result.truncated is True
+    assert result.output_tokens == 900
+
+
+def test_build_schedule_is_repeatable_and_sized_per_scenario() -> None:
+    """Schedules are repeatable, ascending, and roughly the expected size per scenario."""
+    spike = build_schedule("spike", 42)
+    assert spike == build_schedule("spike", 42)
+    assert spike == sorted(spike)
+    assert 200 <= len(spike) <= 360
+    assert spike[-1] < 60
+    assert 10 <= len(build_schedule("smoke", 42)) <= 30
+    assert 70 <= len(build_schedule("normal", 42)) <= 170
+    with pytest.raises(ValueError):
+        build_schedule("unknown", 42)
