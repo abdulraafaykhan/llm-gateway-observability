@@ -1,0 +1,11 @@
+[models.small]
+provider = "groq"
+model_id = "openai/gpt-oss-20b"
+input_price_per_million_tokens = 0.0   # TODO: fill from Groq pricing page
+output_price_per_million_tokens = 0.0  # TODO: fill from Groq pricing page
+
+[models.big]
+provider = "groq"
+model_id = "openai/gpt-oss-120b"
+input_price_per_million_tokens = 0.0   # TODO: fill from Groq pricing page
+output_price_per_million_tokens = 0.0  # TODO: fill from Groq pricing page
