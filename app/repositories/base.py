@@ -19,3 +19,7 @@ class RequestRepository(ABC):
     @abstractmethod
     async def list_recent(self, limit: int) -> list[RequestRecord]:
         """Return up to limit records, newest first."""
+
+    @abstractmethod
+    async def list_all(self, since: str | None = None) -> list[RequestRecord]:
+        """Return all records, or those with created_at >= since (UTC ISO), oldest id first."""

@@ -41,6 +41,10 @@ INSERT INTO requests (
 
 SELECT_RECENT_SQL = "SELECT * FROM requests ORDER BY created_at DESC, id DESC LIMIT ?"
 
+SELECT_ALL_SQL = "SELECT * FROM requests ORDER BY id ASC"
+
+SELECT_SINCE_SQL = "SELECT * FROM requests WHERE created_at >= ? ORDER BY id ASC"
+
 
 class SqliteRequestRepository(RequestRepository):
     """Stores request records in a SQLite file, one short-lived connection per call."""
@@ -65,9 +69,21 @@ class SqliteRequestRepository(RequestRepository):
 
     async def list_recent(self, limit: int) -> list[RequestRecord]:
         """Return up to limit records, newest first."""
+        return await self._fetch_records(SELECT_RECENT_SQL, (limit,))
+
+    async def list_all(self, since: str | None = None) -> list[RequestRecord]:
+        """Return all records (or those with created_at >= since), oldest id first."""
+        if since is None:
+            return await self._fetch_records(SELECT_ALL_SQL, ())
+        return await self._fetch_records(SELECT_SINCE_SQL, (since,))
+
+    async def _fetch_records(
+        self, sql: str, parameters: tuple[str | int, ...]
+    ) -> list[RequestRecord]:
+        """Run a parameterized SELECT and turn each row into a RequestRecord."""
         async with self._connect() as connection:
             connection.row_factory = aiosqlite.Row
-            async with connection.execute(SELECT_RECENT_SQL, (limit,)) as cursor:
+            async with connection.execute(sql, parameters) as cursor:
                 rows = await cursor.fetchall()
         return [RequestRecord(**dict(row)) for row in rows]
 
