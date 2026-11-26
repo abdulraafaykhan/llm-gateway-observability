@@ -108,6 +108,19 @@ It was built once with `uv run --no-project --with datasets python scripts/build
     uv run python -m app.cli.load_test_cli --scenario spike --questions config/load_questions_mixed.txt
     uv run python -m app.cli.load_test_cli --scenario spike --questions config/load_questions_mixed.txt --model auto
 
+## Cascade replay
+
+Replays two saved eval runs as a token cascade: small answers first, and a question goes to big if small errored, was cut off, or used more than T output tokens. It prints the score and cost for several values of T next to "all big", "all small" and "fallback only", with no model calls.
+
+    uv run python -m app.cli.cascade_replay_cli --small results\eval_small-mmlu_<stamp>.json --big results\eval_big-mmlu_<stamp>.json
+    uv run python -m app.cli.cascade_replay_cli --small results\eval_small_<stamp>.json --big results\eval_big_<stamp>.json --split all
+
+Options: `--split both|all|tune|test` (default `both`: a tune table then a test table), `--limits 500,1000,1500,2000,3000,4000`.
+
+- `rescued`: questions small got wrong that the final answer got right. `lost`: questions small got right that the final answer got wrong.
+- `cost vs all big`: the row's cost as a percentage of sending everything to big.
+- Decision rule: build a token cascade into the gateway only if one limit beats "fallback only" by at least 2 passed questions on BOTH the tune and test splits and also costs less than "all big".
+
 ## Layout
 
 - `config/` model entries (`models.toml`); the table key (`small`, `big`) is the model name; also routing rules (`routing.toml`), fake-mode profiles (`fake.toml`) and load test questions (`load_questions.txt`)
@@ -116,7 +129,7 @@ It was built once with `uv run --no-project --with datasets python scripts/build
 - `app/views/` request and response shapes for the API, including errors
 - `app/controllers/` FastAPI routers; receive a request, call a service, return a view
 - `app/services/` the logic: chat, model registry, routing config, router replay, stats, fake profiles, load plan, and eval (loader, checker, runner, report)
-- `app/cli/` command-line entry points (stats, load test, eval, eval compare, router replay)
+- `app/cli/` command-line entry points (stats, load test, eval, eval compare, router replay, cascade replay)
 - `app/clients/` HTTP client the eval uses to call the gateway, behind the `GatewayClient` interface
 - `eval/` the labelled eval sets (`eval_set.jsonl`, `mmlu_pro_subset.jsonl`)
 - `scripts/` one-off data builders (not part of the app)

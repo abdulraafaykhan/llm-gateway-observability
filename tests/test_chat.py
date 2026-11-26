@@ -24,6 +24,7 @@ from app.repositories.base import RequestRepository
 from app.repositories.sqlite_repository import SqliteRequestRepository
 from app.routing.base import Router
 from app.routing.factory import build_rule_router
+from app.services.cascade_replay import build_cascade_table, escalate
 from app.services.chat_service import ChatService
 from app.services.eval_checker import check_answer
 from app.services.eval_loader import load_eval_set
@@ -34,6 +35,7 @@ from app.services.model_registry import ModelRegistry
 from app.services.router_replay import replay, replay_baselines
 from app.services.routing_config import load_routing_config, validate_routing_models
 from app.services.stats_service import StatsService, compute_group_stats, percentile
+from app.views.cascade_text_view import render_cascade_tables
 from app.views.eval_text_view import render_eval_summary
 from app.views.stats_text_view import render_stats_report
 
@@ -958,3 +960,120 @@ def test_mixed_load_file_routes_hard_lines_to_big() -> None:
     for line in lines[40:]:
         decision = router.choose([Message(role="user", content=line)])
         assert decision.model_name == "big", (line, decision.reason)
+
+
+def cascade_outcome(
+    question_id: str,
+    status: str,
+    output_tokens: int = 100,
+    cost: float = 0.001,
+    split: str = "tune",
+    truncated: bool = False,
+) -> EvalOutcome:
+    """Build a saved outcome with the fields the cascade replay reads."""
+    return make_outcome(question_id, status).model_copy(
+        update={
+            "output_tokens": output_tokens,
+            "cost_usd": cost,
+            "split": split,
+            "truncated": truncated,
+        }
+    )
+
+
+def test_cascade_replay_rows_follow_the_definitions() -> None:
+    """Baselines, fallback-only, and a token limit count, rescue, lose, and cost as defined."""
+    small_run = make_run(
+        "small",
+        [
+            cascade_outcome("q1", "passed", 300, 0.001, "tune"),
+            cascade_outcome("q2", "error", 0, 0.0005, "test"),
+            cascade_outcome("q3", "failed", 4096, 0.002, "tune", truncated=True),
+            cascade_outcome("q4", "passed", 3000, 0.003, "test"),
+            cascade_outcome("q5", "failed", 200, 0.001, "tune"),
+        ],
+    )
+    big_run = make_run(
+        "big",
+        [
+            cascade_outcome("q1", "passed", cost=0.01),
+            cascade_outcome("q2", "passed", cost=0.01),
+            cascade_outcome("q3", "failed", cost=0.01),
+            cascade_outcome("q4", "failed", cost=0.01),
+            cascade_outcome("q5", "passed", cost=0.01),
+        ],
+    )
+    table = build_cascade_table(small_run, big_run, "all", [1000])
+    all_big, all_small, fallback, limit_row = table.rows
+    assert [row.label for row in table.rows] == [
+        "all big",
+        "all small",
+        "fallback only",
+        "tokens > 1000",
+    ]
+    assert (all_big.kept_small, all_big.escalated, all_big.passed) == (0, 5, 3)
+    assert (all_big.rescued, all_big.lost) == (2, 1)
+    assert all_big.cost_usd == pytest.approx(0.05)
+    assert (all_small.kept_small, all_small.escalated, all_small.passed) == (5, 0, 2)
+    assert (all_small.rescued, all_small.lost) == (0, 0)
+    assert all_small.cost_usd == pytest.approx(0.0075)
+    assert (fallback.kept_small, fallback.escalated, fallback.passed) == (3, 2, 3)
+    assert (fallback.rescued, fallback.lost) == (1, 0)
+    assert fallback.cost_usd == pytest.approx(0.001 + 0.0105 + 0.012 + 0.003 + 0.001)
+    assert (limit_row.limit, limit_row.kept_small, limit_row.escalated) == (1000, 2, 3)
+    assert (limit_row.passed, limit_row.rescued, limit_row.lost) == (2, 1, 1)
+    assert limit_row.cost_usd == pytest.approx(0.001 + 0.0105 + 0.012 + 0.013 + 0.001)
+
+
+def test_cascade_replay_edge_cases() -> None:
+    """Errors and cut-offs always escalate; unshared ids and other splits are ignored."""
+    errored = cascade_outcome("q1", "error", 0)
+    cut_off = cascade_outcome("q2", "failed", 50, truncated=True)
+    for limit in (1, 10**9, None):
+        assert escalate(errored, limit) and escalate(cut_off, limit)
+    small_run = make_run(
+        "small",
+        [
+            cascade_outcome("q1", "passed", split="tune"),
+            cascade_outcome("q2", "passed", split="test"),
+            cascade_outcome("q9", "passed", split="tune"),
+        ],
+    )
+    big_run = make_run(
+        "big",
+        [
+            cascade_outcome("q1", "passed", cost=0.0),
+            cascade_outcome("q2", "passed", cost=0.0, split="test"),
+            cascade_outcome("q8", "passed", cost=0.0),
+        ],
+    )
+    assert build_cascade_table(small_run, big_run, "all", [500]).questions == 2
+    tune_table = build_cascade_table(small_run, big_run, "tune", [500])
+    assert tune_table.questions == 1
+    assert "n/a" in render_cascade_tables([tune_table]).splitlines()[3]
+    empty = build_cascade_table(small_run, make_run("big", []), "test", [500])
+    assert (empty.questions, empty.rows, empty.small_tokens) == (0, [], None)
+    assert "CASCADE REPLAY  |  split: test  |  no questions found in both runs." in (
+        render_cascade_tables([empty])
+    )
+
+
+def test_cascade_token_stats_and_rendering() -> None:
+    """Token stats use nearest-rank and skip errors; the rendered text has every section."""
+    small_outcomes = [
+        cascade_outcome(f"q{index}", "passed", tokens)
+        for index, tokens in enumerate(range(10, 110, 10))
+    ]
+    small_outcomes.append(cascade_outcome("q99", "error", 99999))
+    big_outcomes = [cascade_outcome(outcome.id, "passed", cost=0.01) for outcome in small_outcomes]
+    table = build_cascade_table(
+        make_run("small", small_outcomes), make_run("big", big_outcomes), "all", [500]
+    )
+    assert table.small_tokens is not None
+    stats = table.small_tokens
+    assert (stats.p50, stats.p75, stats.p90, stats.max) == (50.0, 80.0, 90.0, 100.0)
+    text = render_cascade_tables([table])
+    for label in ("all big", "all small", "fallback only", "tokens > 500"):
+        assert f"  {label}" in text
+    assert "SMALL'S OUTPUT TOKENS (answered questions): p50 50 | p75 80 | p90 90 | max 100" in text
+    assert text.count("NOTES") == 1
