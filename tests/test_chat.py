@@ -44,12 +44,20 @@ output_price_per_million_tokens = 1.5
 class FakeProvider(LLMProvider):
     """Provider that returns a fixed answer, or raises ProviderError when told to."""
 
-    def __init__(self, should_fail: bool = False, truncated: bool = False) -> None:
+    def __init__(
+        self,
+        should_fail: bool = False,
+        truncated: bool = False,
+        error: ProviderError | None = None,
+    ) -> None:
         self.should_fail: bool = should_fail
         self.truncated: bool = truncated
+        self.error: ProviderError | None = error
 
     async def complete(self, model_spec: ModelSpec, messages: list[Message]) -> CompletionResult:
-        """Return a fixed result or raise ProviderError."""
+        """Return a fixed result or raise ProviderError (the given one, if any)."""
+        if self.error is not None:
+            raise self.error
         if self.should_fail:
             raise ProviderError("Fake provider failure")
         return CompletionResult(
@@ -208,6 +216,28 @@ async def test_provider_error_records_one_error_row() -> None:
     assert record.status == "error"
     assert record.error_type == "provider_error"
     assert record.answer is None
+
+
+async def test_empty_answer_error_records_tokens_and_cost() -> None:
+    """A provider error carrying token counts is recorded with those tokens and their cost."""
+    registry = ModelRegistry(MODELS_CONFIG_PATH)
+    repository = InMemoryRequestRepository()
+    error = ProviderError(
+        "Groq returned an empty answer (finish_reason=length, output_tokens=4096)",
+        input_tokens=50,
+        output_tokens=4096,
+        finish_reason="length",
+    )
+    async with build_client(FakeProvider(error=error), repository, registry) as client:
+        response = await client.post("/v1/chat", json=VALID_BODY)
+    assert response.status_code == 502
+    assert len(repository.records) == 1
+    record = repository.records[0]
+    assert record.status == "error"
+    assert record.error_message == str(error)
+    assert (record.input_tokens, record.output_tokens) == (50, 4096)
+    assert record.cost_usd == registry.get("big").cost_usd(50, 4096)
+    assert record.cost_usd > 0
 
 
 async def test_truncated_answer_records_one_truncated_row() -> None:

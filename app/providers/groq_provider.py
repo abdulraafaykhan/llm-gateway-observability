@@ -50,12 +50,10 @@ class GroqProvider(LLMProvider):
 
 def _to_completion_result(response: Any) -> CompletionResult:
     """Turn a Groq chat completion into a CompletionResult, rejecting empty answers."""
-    if not response.choices:
-        raise ProviderError("Groq returned an empty answer")
-    choice = response.choices[0]
-    text = choice.message.content
+    choice = response.choices[0] if response.choices else None
+    text = choice.message.content if choice is not None else None
     if not text or not text.strip():
-        raise ProviderError("Groq returned an empty answer")
+        raise _empty_answer_error(response, choice)
     if response.usage is None:
         raise ProviderError("Groq response did not include token usage")
     return CompletionResult(
@@ -63,6 +61,22 @@ def _to_completion_result(response: Any) -> CompletionResult:
         input_tokens=response.usage.prompt_tokens,
         output_tokens=response.usage.completion_tokens,
         truncated=choice.finish_reason == "length",
+    )
+
+
+def _empty_answer_error(response: Any, choice: Any) -> ProviderError:
+    """Build the empty-answer error with the real stop reason and token counts from Groq."""
+    finish_reason = choice.finish_reason if choice is not None else None
+    usage = response.usage
+    input_tokens = usage.prompt_tokens if usage is not None else 0
+    output_tokens = usage.completion_tokens if usage is not None else 0
+    output_text = str(output_tokens) if usage is not None else "unknown"
+    return ProviderError(
+        f"Groq returned an empty answer (finish_reason={finish_reason}, "
+        f"output_tokens={output_text})",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        finish_reason=finish_reason,
     )
 
 

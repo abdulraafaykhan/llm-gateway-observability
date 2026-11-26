@@ -128,8 +128,8 @@ def _error_record(
         status="error",
         error_type="provider_error",
         error_message=str(error),
-        input_tokens=0,
-        output_tokens=0,
+        input_tokens=error.input_tokens,
+        output_tokens=error.output_tokens,
         latency_ms=latency_ms,
-        cost_usd=0.0,
+        cost_usd=model_spec.cost_usd(error.input_tokens, error.output_tokens),
     )
