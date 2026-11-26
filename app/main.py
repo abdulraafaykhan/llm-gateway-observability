@@ -9,9 +9,16 @@ from fastapi.responses import JSONResponse
 
 from app.config import get_settings
 from app.controllers import chat_controller, health_controller, request_log_controller
-from app.dependencies import get_llm_provider, get_model_registry, get_request_repository
+from app.dependencies import (
+    get_llm_provider,
+    get_model_registry,
+    get_request_repository,
+    get_router,
+    get_routing_config,
+)
 from app.providers.base import ProviderError
 from app.services.model_registry import UnknownModelError
+from app.services.routing_config import validate_routing_models
 from app.views.error_view import ErrorDetail, ErrorResponse
 
 logger = logging.getLogger(__name__)
@@ -28,6 +35,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     registry = get_model_registry()
     logger.info("Loaded models: %s", ", ".join(registry.names()))
     get_llm_provider()
+    routing_config = get_routing_config()
+    validate_routing_models(routing_config, registry)
+    get_router()
+    logger.info(
+        "Router ready: small=%s big=%s threshold=%d fallback=%s",
+        routing_config.small_model,
+        routing_config.big_model,
+        routing_config.threshold,
+        routing_config.fallback_model if routing_config.fallback_enabled else "off",
+    )
     if settings.provider_mode == "fake":
         logger.warning("FAKE MODE: answers and timings are simulated")
     await get_request_repository().initialize()

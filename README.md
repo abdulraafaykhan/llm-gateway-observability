@@ -72,14 +72,34 @@ Each run saves its per-question results to `results/eval_<label>_<stamp>.json`. 
 - Grading uses plain rules, not an AI judge. The number check is lenient: any number in the answer that equals the key counts.
 - Results vary slightly between runs, even at temperature 0.
 
+## Routing
+
+Send `"model": "auto"` to let the router pick `small` or `big`. Sending `"small"` or `"big"` bypasses the router, so baselines stay clean. The rules live in `config/routing.toml`: each rule (long question, keywords, many numbers, several question marks) adds points, and a score at or above `threshold` goes to big.
+
+Fallback: for `auto` requests only, if the chosen model fails or its answer is cut off, the gateway retries once on `fallback_model` (big). The response and the request log show `requested_model`, `route_reason`, `fallback_used` and `cost_usd`. Tokens, latency and cost are totals over both attempts.
+
+Replay the saved eval runs through the router at several thresholds, with no model calls:
+
+    uv run python -m app.cli.router_replay_cli --small results\eval_small_<stamp>.json --big results\eval_big_<stamp>.json --split tune
+
+Options: `--split all|tune|test`, `--thresholds 0,1,2,3,4,5`, `--no-fallback`. Workflow: pick the threshold on the `tune` split, set it in `config/routing.toml`, then report the score from the `test` split.
+
+Fake-mode comparison against the baselines (start from a clean `data\fake.db` as above):
+
+    uv run python -m app.cli.load_test_cli --scenario spike --model auto
+    uv run python -m app.cli.stats_cli --db data/fake.db --minutes 3 | Out-File -Encoding utf8 results/router_spike.txt
+
+Real-mode eval through the router: `uv run python -m app.cli.eval_cli --model auto --split test` (the summary adds a `routing:` line).
+
 ## Layout
 
-- `config/` model entries (`models.toml`); the table key (`small`, `big`) is the model name; also fake-mode profiles (`fake.toml`) and load test questions (`load_questions.txt`)
+- `config/` model entries (`models.toml`); the table key (`small`, `big`) is the model name; also routing rules (`routing.toml`), fake-mode profiles (`fake.toml`) and load test questions (`load_questions.txt`)
+- `app/routing/` the `Router` interface, the scoring rules, and the rule router
 - `app/models/` plain data shapes used inside the app (Pydantic only)
 - `app/views/` request and response shapes for the API, including errors
 - `app/controllers/` FastAPI routers; receive a request, call a service, return a view
-- `app/services/` the logic: chat, model registry, stats, fake profiles, load plan, and eval (loader, checker, runner, report)
-- `app/cli/` command-line entry points (stats, load test, eval, eval compare)
+- `app/services/` the logic: chat, model registry, routing config, router replay, stats, fake profiles, load plan, and eval (loader, checker, runner, report)
+- `app/cli/` command-line entry points (stats, load test, eval, eval compare, router replay)
 - `app/clients/` HTTP client the eval uses to call the gateway, behind the `GatewayClient` interface
 - `eval/` the labelled eval set (`eval_set.jsonl`)
 - `results/` saved stats reports and eval runs
@@ -89,4 +109,4 @@ Each run saves its per-question results to `results/eval_<label>_<stamp>.json`. 
 - `data/` the SQLite request log (`gateway.db`), created at startup and git-ignored
 - `tests/` tests that use a fake provider and an in-memory repository (no network)
 
-Planned for later parts (not built yet): router service, cache service, dashboard.
+Planned for later parts (not built yet): cache service, dashboard.

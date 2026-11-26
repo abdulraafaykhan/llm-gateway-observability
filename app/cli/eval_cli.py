@@ -14,12 +14,10 @@ import httpx
 from app.cli.load_test_cli import fetch_mode
 from app.cli.stats_cli import positive_int
 from app.clients.gateway_client import HttpGatewayClient
-from app.config import get_settings
 from app.models.eval import EvalQuestion, EvalRunResult
 from app.services.eval_loader import load_eval_set
 from app.services.eval_report import summarize
 from app.services.eval_runner import EvalRunner
-from app.services.model_registry import ModelRegistry
 from app.views.eval_text_view import render_eval_set_overview, render_eval_summary
 
 RESULTS_FOLDER = Path("results")
@@ -88,7 +86,6 @@ async def run_eval(args: argparse.Namespace, questions: list[EvalQuestion]) -> i
             return 1
         runner = EvalRunner(
             client=HttpGatewayClient(args.base_url, http_client),
-            registry=ModelRegistry(get_settings().models_config_path),
             concurrency=args.concurrency,
             retries=args.retries,
             retry_wait_seconds=args.retry_wait_seconds,

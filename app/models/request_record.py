@@ -21,3 +21,6 @@ class RequestRecord(BaseModel):
     output_tokens: int
     latency_ms: float
     cost_usd: float
+    requested_model: str = ""
+    route_reason: str = ""
+    fallback_used: bool = False

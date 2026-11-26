@@ -53,6 +53,7 @@ def compute_group_stats(records: list[RequestRecord]) -> GroupStats:
         total_cost_usd=total_cost_usd,
         cost_per_1000_answered_usd=total_cost_usd / answered * 1000 if answered else 0.0,
         latency=compute_latency_stats([record.latency_ms for record in answered_records]),
+        fallbacks=sum(1 for record in records if record.fallback_used),
     )
 
 

@@ -37,7 +37,7 @@ def render_group_lines(group: GroupStats, indent: str) -> list[str]:
     return [
         f"{indent}requests: {group.requests} | answered: {group.answered} "
         f"(truncated: {group.truncated}) | errors: {group.errors} "
-        f"| error rate: {group.error_rate_percent:.1f}%",
+        f"| error rate: {group.error_rate_percent:.1f}% | fallbacks: {group.fallbacks}",
         f"{indent}tokens in: {group.input_tokens} | tokens out: {group.output_tokens}",
         f"{indent}total cost: ${group.total_cost_usd:.6f} "
         f"| cost per 1,000 answered: ${group.cost_per_1000_answered_usd:.6f}",

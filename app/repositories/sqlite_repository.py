@@ -23,19 +23,31 @@ CREATE TABLE IF NOT EXISTS requests (
     input_tokens INTEGER NOT NULL,
     output_tokens INTEGER NOT NULL,
     latency_ms REAL NOT NULL,
-    cost_usd REAL NOT NULL
+    cost_usd REAL NOT NULL,
+    requested_model TEXT NOT NULL DEFAULT '',
+    route_reason TEXT NOT NULL DEFAULT '',
+    fallback_used INTEGER NOT NULL DEFAULT 0
 )
 """
+
+# Columns added after the first version; older databases get them through ALTER TABLE.
+ADDED_COLUMNS: dict[str, str] = {
+    "requested_model": "TEXT NOT NULL DEFAULT ''",
+    "route_reason": "TEXT NOT NULL DEFAULT ''",
+    "fallback_used": "INTEGER NOT NULL DEFAULT 0",
+}
 
 CREATE_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_requests_created_at ON requests (created_at)"
 
 INSERT_SQL = """
 INSERT INTO requests (
     created_at, model_name, model_id, question, answer, status, error_type,
-    error_message, input_tokens, output_tokens, latency_ms, cost_usd
+    error_message, input_tokens, output_tokens, latency_ms, cost_usd,
+    requested_model, route_reason, fallback_used
 ) VALUES (
     :created_at, :model_name, :model_id, :question, :answer, :status, :error_type,
-    :error_message, :input_tokens, :output_tokens, :latency_ms, :cost_usd
+    :error_message, :input_tokens, :output_tokens, :latency_ms, :cost_usd,
+    :requested_model, :route_reason, :fallback_used
 )
 """
 
@@ -53,18 +65,21 @@ class SqliteRequestRepository(RequestRepository):
         self._database_path: Path = database_path
 
     async def initialize(self) -> None:
-        """Create the database folder, enable WAL, and create the table and index."""
+        """Create the folder, enable WAL, create the table and index, and add missing columns."""
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
         async with self._connect() as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.execute(CREATE_TABLE_SQL)
+            await _add_missing_columns(connection)
             await connection.execute(CREATE_INDEX_SQL)
             await connection.commit()
 
     async def add(self, record: RequestRecord) -> None:
         """Insert one record."""
+        parameters = record.model_dump(exclude={"id"})
+        parameters["fallback_used"] = int(record.fallback_used)
         async with self._connect() as connection:
-            await connection.execute(INSERT_SQL, record.model_dump(exclude={"id"}))
+            await connection.execute(INSERT_SQL, parameters)
             await connection.commit()
 
     async def list_recent(self, limit: int) -> list[RequestRecord]:
@@ -93,3 +108,12 @@ class SqliteRequestRepository(RequestRepository):
         async with aiosqlite.connect(self._database_path) as connection:
             await connection.execute("PRAGMA busy_timeout=5000")
             yield connection
+
+
+async def _add_missing_columns(connection: aiosqlite.Connection) -> None:
+    """Upgrade an older requests table; column names and definitions are fixed constants."""
+    async with connection.execute("PRAGMA table_info(requests)") as cursor:
+        existing = {row[1] for row in await cursor.fetchall()}
+    for name, definition in ADDED_COLUMNS.items():
+        if name not in existing:
+            await connection.execute(f"ALTER TABLE requests ADD COLUMN {name} {definition}")

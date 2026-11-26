@@ -15,6 +15,11 @@ router = APIRouter(tags=["health"])
 async def health(
     registry: Annotated[ModelRegistry, Depends(get_model_registry)],
     settings: Annotated[Settings, Depends(get_settings)],
-) -> dict[str, str | list[str]]:
-    """Report that the server is up, the provider mode, and the configured model names."""
-    return {"status": "ok", "mode": settings.provider_mode, "models": registry.names()}
+) -> dict[str, str | list[str] | bool]:
+    """Report the server status, provider mode, model names, and that "auto" routing is on."""
+    return {
+        "status": "ok",
+        "mode": settings.provider_mode,
+        "models": registry.names(),
+        "auto": True,
+    }

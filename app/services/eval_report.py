@@ -9,10 +9,12 @@ from app.models.eval import (
     EvalRunResult,
     EvalSummary,
     OutcomePair,
+    RoutingCounts,
     ScoreCount,
 )
 from app.services.stats_service import percentile
 
+AUTO_MODEL: str = "auto"
 DIFFICULTIES: tuple[str, ...] = ("easy", "hard")
 SPLITS: tuple[str, ...] = ("tune", "test")
 
@@ -55,6 +57,17 @@ def summarize(run: EvalRunResult) -> EvalSummary:
         latency_p95_ms=percentile(latencies, 95) if latencies else None,
         failed_outcomes=[outcome for outcome in outcomes if outcome.status == "failed"],
         error_outcomes=[outcome for outcome in outcomes if outcome.status == "error"],
+        routing=routing_counts(outcomes) if run.model_requested == AUTO_MODEL else None,
+    )
+
+
+def routing_counts(outcomes: list[EvalOutcome]) -> RoutingCounts:
+    """Count answered outcomes by the model that answered, plus fallbacks (all outcomes)."""
+    answered = [outcome for outcome in outcomes if outcome.status != "error"]
+    return RoutingCounts(
+        to_small=sum(1 for outcome in answered if outcome.answered_by == "small"),
+        to_big=sum(1 for outcome in answered if outcome.answered_by == "big"),
+        fallbacks=sum(1 for outcome in outcomes if outcome.fallback_used),
     )
 
 

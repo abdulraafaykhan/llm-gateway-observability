@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     provider_mode: Literal["real", "fake"] = "real"
     fake_config_path: str = "config/fake.toml"
     fake_seed: int = 42
+    routing_config_path: str = "config/routing.toml"
 
 
 @lru_cache

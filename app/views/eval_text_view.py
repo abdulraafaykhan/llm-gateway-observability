@@ -23,6 +23,7 @@ def render_eval_summary(summary: EvalSummary, saved_path: str) -> str:
         f"  questions: {summary.questions} | passed: {summary.passed} | failed: {summary.failed}"
         f" | errors: {summary.errors} | truncated (counted as failed): {summary.truncated}",
         f"  score: {summary.score_percent:.1f}% (passed / questions)",
+        *render_routing_lines(summary),
         "  "
         + " | ".join(
             f"{name}: {render_score(score)}" for name, score in summary.by_difficulty.items()
@@ -36,6 +37,17 @@ def render_eval_summary(summary: EvalSummary, saved_path: str) -> str:
     if summary.error_outcomes:
         lines += ["", "ERRORS", *map(render_error_line, summary.error_outcomes)]
     return "\n".join(lines)
+
+
+def render_routing_lines(summary: EvalSummary) -> list[str]:
+    """Render the routing line for an "auto" run, or nothing for other runs."""
+    routing = summary.routing
+    if routing is None:
+        return []
+    return [
+        f"  routing: to small {routing.to_small} | to big {routing.to_big} "
+        f"| fallbacks {routing.fallbacks}"
+    ]
 
 
 def render_score(score: ScoreCount) -> str:

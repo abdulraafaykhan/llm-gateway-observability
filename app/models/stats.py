@@ -27,6 +27,7 @@ class GroupStats(BaseModel):
     total_cost_usd: float
     cost_per_1000_answered_usd: float
     latency: LatencyStats | None
+    fallbacks: int = 0
 
 
 class StatsReport(BaseModel):

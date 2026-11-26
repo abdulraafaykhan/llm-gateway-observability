@@ -1,0 +1,22 @@
+[router]
+small_model = "small"
+big_model = "big"
+threshold = 2
+fallback_enabled = true
+fallback_model = "big"
+
+[rules.long_question]
+medium_words = 40
+long_words = 90
+
+[rules.keywords]
+points = 1
+words = ["calculate", "compute", "step by step", "compare", "difference between", "prove", "derive", "write a function", "write code", "algorithm", "explain why", "round to"]
+
+[rules.many_numbers]
+points = 1
+min_numbers = 3
+
+[rules.multiple_questions]
+points = 1
+min_question_marks = 2

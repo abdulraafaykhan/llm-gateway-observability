@@ -52,6 +52,9 @@ def _success_reply(response: httpx.Response) -> GatewayReply:
         latency_ms=data.get("latency_ms"),
         truncated=bool(data.get("truncated", False)),
         error_message=None,
+        cost_usd=float(data.get("cost_usd", 0.0)),
+        route_reason=str(data.get("route_reason", "")),
+        fallback_used=bool(data.get("fallback_used", False)),
     )
 
 

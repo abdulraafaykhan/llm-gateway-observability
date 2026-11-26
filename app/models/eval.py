@@ -34,6 +34,9 @@ class GatewayReply(BaseModel):
     latency_ms: float | None
     truncated: bool
     error_message: str | None
+    cost_usd: float = 0.0
+    route_reason: str = ""
+    fallback_used: bool = False
 
 
 class EvalOutcome(BaseModel):
@@ -56,6 +59,8 @@ class EvalOutcome(BaseModel):
     cost_usd: float
     error_message: str | None
     attempts: int
+    route_reason: str = ""
+    fallback_used: bool = False
 
 
 class EvalRunResult(BaseModel):
@@ -75,6 +80,14 @@ class ScoreCount(BaseModel):
     passed: int
     total: int
     percent: float
+
+
+class RoutingCounts(BaseModel):
+    """Where an "auto" run's answered questions went, and how many fell back."""
+
+    to_small: int
+    to_big: int
+    fallbacks: int
 
 
 class EvalSummary(BaseModel):
@@ -98,6 +111,7 @@ class EvalSummary(BaseModel):
     latency_p95_ms: float | None
     failed_outcomes: list[EvalOutcome]
     error_outcomes: list[EvalOutcome]
+    routing: RoutingCounts | None = None
 
 
 class OutcomePair(BaseModel):

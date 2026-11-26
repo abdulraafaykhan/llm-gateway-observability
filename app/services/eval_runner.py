@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from app.clients.base import GatewayClient
 from app.models.eval import EvalOutcome, EvalQuestion, EvalRunResult, GatewayReply
 from app.services.eval_checker import check_answer
-from app.services.model_registry import ModelRegistry
 
 
 def should_retry(reply: GatewayReply) -> bool:
@@ -21,13 +20,11 @@ class EvalRunner:
     def __init__(
         self,
         client: GatewayClient,
-        registry: ModelRegistry,
         concurrency: int,
         retries: int,
         retry_wait_seconds: float,
     ) -> None:
         self._client: GatewayClient = client
-        self._registry: ModelRegistry = registry
         self._semaphore: asyncio.Semaphore = asyncio.Semaphore(concurrency)
         self._retries: int = retries
         self._retry_wait_seconds: float = retry_wait_seconds
@@ -91,13 +88,9 @@ class EvalRunner:
             input_tokens=reply.input_tokens,
             output_tokens=reply.output_tokens,
             latency_ms=reply.latency_ms,
-            cost_usd=self._cost(reply) if answered else 0.0,
+            cost_usd=reply.cost_usd if answered else 0.0,
             error_message=error_message,
             attempts=attempts,
+            route_reason=reply.route_reason,
+            fallback_used=reply.fallback_used,
         )
-
-    def _cost(self, reply: GatewayReply) -> float:
-        """Price the reply's tokens for the model that answered, or 0.0 if it is unknown."""
-        if reply.model is None or reply.model not in self._registry.names():
-            return 0.0
-        return self._registry.get(reply.model).cost_usd(reply.input_tokens, reply.output_tokens)

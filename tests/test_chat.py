@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import aiosqlite
 import httpx
 import pytest
 
@@ -16,10 +17,13 @@ from app.models.eval import EvalOutcome, EvalQuestion, EvalRunResult, GatewayRep
 from app.models.fake_profile import FakeProfile
 from app.models.model_spec import ModelSpec
 from app.models.request_record import RequestRecord
+from app.models.routing import RouteDecision
 from app.providers import fake_provider
 from app.providers.base import LLMProvider, ProviderError
 from app.repositories.base import RequestRepository
 from app.repositories.sqlite_repository import SqliteRequestRepository
+from app.routing.base import Router
+from app.routing.factory import build_rule_router
 from app.services.chat_service import ChatService
 from app.services.eval_checker import check_answer
 from app.services.eval_loader import load_eval_set
@@ -27,10 +31,13 @@ from app.services.eval_report import compare_runs
 from app.services.eval_runner import EvalRunner
 from app.services.load_plan import build_schedule
 from app.services.model_registry import ModelRegistry
+from app.services.router_replay import replay, replay_baselines
+from app.services.routing_config import load_routing_config, validate_routing_models
 from app.services.stats_service import StatsService, compute_group_stats, percentile
 from app.views.stats_text_view import render_stats_report
 
 MODELS_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "models.toml"
+ROUTING_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "routing.toml"
 VALID_BODY = {"messages": [{"role": "user", "content": "What is the capital of France?"}]}
 PRICED_MODELS_TOML = """
 [models.big]
@@ -93,11 +100,14 @@ def build_client(
     provider: LLMProvider,
     repository: RequestRepository | None = None,
     registry: ModelRegistry | None = None,
+    router: Router | None = None,
 ) -> httpx.AsyncClient:
     """Build an HTTP client for an app whose ChatService uses the given fakes."""
     app = create_app()
     chat_registry = registry or ModelRegistry(MODELS_CONFIG_PATH)
     chat_repository = repository or InMemoryRequestRepository()
+    routing_config = load_routing_config(str(ROUTING_CONFIG_PATH))
+    chat_router = router or build_rule_router(routing_config)
 
     def get_fake_chat_service() -> ChatService:
         """Return a ChatService wired with the fakes."""
@@ -105,6 +115,8 @@ def build_client(
             provider=provider,
             registry=chat_registry,
             repository=chat_repository,
+            router=chat_router,
+            routing_config=routing_config,
             default_model_name="big",
         )
 
@@ -145,6 +157,10 @@ async def test_chat_returns_answer_with_all_fields() -> None:
         "output_tokens",
         "latency_ms",
         "truncated",
+        "requested_model",
+        "route_reason",
+        "fallback_used",
+        "cost_usd",
     }
     assert body["answer"] == "Paris"
     assert body["model"] == "big"
@@ -566,6 +582,7 @@ def make_reply(
         "latency_ms": 100.0,
         "truncated": False,
         "error_message": None if http_status == 200 else "boom",
+        "cost_usd": 0.00002 if http_status == 200 else 0.0,
     }
     fields.update(changes)
     return GatewayReply(**fields)
@@ -585,7 +602,6 @@ async def test_eval_runner_grades_and_retries() -> None:
     ]
     runner = EvalRunner(
         client=ScriptedGatewayClient(replies),
-        registry=ModelRegistry(MODELS_CONFIG_PATH),
         concurrency=2,
         retries=2,
         retry_wait_seconds=0,
@@ -594,7 +610,7 @@ async def test_eval_runner_grades_and_retries() -> None:
     outcomes = {outcome.question: outcome for outcome in run.outcomes}
     assert [outcome.question for outcome in run.outcomes] == list(replies)
     assert outcomes["correct"].status == "passed"
-    assert outcomes["correct"].cost_usd > 0
+    assert outcomes["correct"].cost_usd == 0.00002
     assert outcomes["wrong"].status == "failed"
     assert (outcomes["cut off"].status, outcomes["cut off"].truncated) == ("failed", True)
     assert (outcomes["server error"].status, outcomes["server error"].attempts) == ("error", 3)
@@ -631,3 +647,247 @@ def test_compare_runs_groups_shared_questions() -> None:
     assert (report.both_not_passed.count, report.both_not_passed.hard) == (1, 1)
     assert report.score_a_percent == pytest.approx(50.0)
     assert report.score_b_percent == pytest.approx(50.0)
+
+
+class FixedRouter(Router):
+    """Router stub that always picks the same model."""
+
+    def __init__(self, model_name: str) -> None:
+        self.model_name: str = model_name
+
+    def choose(self, messages: list[Message]) -> RouteDecision:
+        """Return the fixed model with a stub reason."""
+        return RouteDecision(
+            model_name=self.model_name,
+            score=0,
+            threshold=2,
+            hits=[],
+            reason=f"stub: always {self.model_name}",
+        )
+
+
+class QuestionRouter(Router):
+    """Router stub that picks big only for the listed question texts."""
+
+    def __init__(self, big_questions: set[str]) -> None:
+        self.big_questions: set[str] = big_questions
+
+    def choose(self, messages: list[Message]) -> RouteDecision:
+        """Pick big when the last message is one of the listed questions."""
+        model_name = "big" if messages[-1].content in self.big_questions else "small"
+        return RouteDecision(model_name=model_name, score=0, threshold=2, hits=[], reason="stub")
+
+
+class PerModelProvider(LLMProvider):
+    """Provider stub that returns or raises a scripted result per model name."""
+
+    def __init__(self, behaviour: dict[str, CompletionResult | ProviderError]) -> None:
+        self.behaviour: dict[str, CompletionResult | ProviderError] = behaviour
+
+    async def complete(self, model_spec: ModelSpec, messages: list[Message]) -> CompletionResult:
+        """Return or raise what was scripted for this model."""
+        outcome = self.behaviour[model_spec.name]
+        if isinstance(outcome, ProviderError):
+            raise outcome
+        return outcome
+
+
+def answer(text: str = "Paris", truncated: bool = False) -> CompletionResult:
+    """Build a provider result with fixed token counts."""
+    return CompletionResult(text=text, input_tokens=12, output_tokens=3, truncated=truncated)
+
+
+AUTO_BODY = {**VALID_BODY, "model": "auto"}
+
+
+def test_rule_router_scores_and_explains() -> None:
+    """Plain questions go small, keyword- and number-heavy ones go big, with clear reasons."""
+    config = load_routing_config(str(ROUTING_CONFIG_PATH))
+    router = build_rule_router(config)
+
+    def ask(text: str, chosen_router: Router = router) -> RouteDecision:
+        """Route one user message."""
+        return chosen_router.choose([Message(role="user", content=text)])
+
+    plain = ask("What is the capital of Japan?")
+    assert (plain.model_name, plain.score) == ("small", 0)
+    assert plain.reason == "score 0 (threshold 2): no rules matched"
+    hard_text = "CALCULATE the total of 12, 15 and 18 dollars. Round to 2 decimal places."
+    hard = ask(hard_text)
+    assert (hard.model_name, hard.score) == ("big", 2)
+    assert hard.reason == (
+        "score 2 (threshold 2): keywords +1 [calculate], many_numbers +1 [4 numbers]"
+    )
+    assert ask(hard_text, build_rule_router(config, threshold=5)).model_name == "small"
+    long_decision = ask("word " * 91)
+    assert long_decision.score == 2
+    assert long_decision.hits[0].rule == "long_question"
+
+
+def test_routing_config_loads_and_validates(tmp_path: Path) -> None:
+    """A valid file loads; a missing key and an unknown model name raise clear errors."""
+    text = ROUTING_CONFIG_PATH.read_text(encoding="utf-8")
+    valid_path = tmp_path / "routing.toml"
+    valid_path.write_text(text, encoding="utf-8")
+    config = load_routing_config(str(valid_path))
+    assert (config.small_model, config.big_model, config.threshold) == ("small", "big", 2)
+    assert "round to" in config.keywords
+    missing_path = tmp_path / "missing.toml"
+    missing_path.write_text(text.replace("min_numbers = 3\n", ""), encoding="utf-8")
+    with pytest.raises(ValueError, match="min_numbers"):
+        load_routing_config(str(missing_path))
+    registry = ModelRegistry(MODELS_CONFIG_PATH)
+    validate_routing_models(config, registry)
+    with pytest.raises(ValueError, match="huge"):
+        validate_routing_models(config.model_copy(update={"big_model": "huge"}), registry)
+
+
+async def test_auto_routes_and_explicit_skips_router() -> None:
+    """auto records the router's choice and reason; an explicit model records "explicit"."""
+    repository = InMemoryRequestRepository()
+    provider = PerModelProvider({"small": answer(), "big": answer()})
+    async with build_client(provider, repository, router=FixedRouter("small")) as client:
+        auto_response = await client.post("/v1/chat", json=AUTO_BODY)
+        big_response = await client.post("/v1/chat", json={**VALID_BODY, "model": "big"})
+    assert auto_response.json()["model"] == "small"
+    assert big_response.json()["model"] == "big"
+    auto_row, big_row = repository.records
+    assert (auto_row.requested_model, auto_row.model_name) == ("auto", "small")
+    assert auto_row.route_reason == "stub: always small"
+    assert auto_row.fallback_used is False
+    assert (big_row.requested_model, big_row.route_reason) == ("big", "explicit")
+
+
+async def test_fallback_on_failure_sums_attempts() -> None:
+    """A failed small attempt falls back to big; one row holds the totals of both attempts."""
+    registry = ModelRegistry(MODELS_CONFIG_PATH)
+    small_error = ProviderError("small failed", input_tokens=10, output_tokens=100)
+    repository = InMemoryRequestRepository()
+    provider = PerModelProvider({"small": small_error, "big": answer("From big")})
+    async with build_client(provider, repository, registry, FixedRouter("small")) as client:
+        response = await client.post("/v1/chat", json=AUTO_BODY)
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["answer"], body["model"], body["fallback_used"]) == ("From big", "big", True)
+    expected_cost = registry.get("small").cost_usd(10, 100) + registry.get("big").cost_usd(12, 3)
+    assert len(repository.records) == 1
+    row = repository.records[0]
+    assert (row.status, row.model_name, row.fallback_used) == ("ok", "big", True)
+    assert (row.input_tokens, row.output_tokens) == (22, 103)
+    assert row.cost_usd == expected_cost
+    assert body["cost_usd"] == expected_cost
+
+    both_fail = PerModelProvider({"small": small_error, "big": ProviderError("big failed")})
+    failed_repository = InMemoryRequestRepository()
+    async with build_client(both_fail, failed_repository, registry, FixedRouter("small")) as client:
+        failed = await client.post("/v1/chat", json=AUTO_BODY)
+    assert failed.status_code == 502
+    assert len(failed_repository.records) == 1
+    failed_row = failed_repository.records[0]
+    assert (failed_row.status, failed_row.fallback_used) == ("error", True)
+    assert failed_row.error_message == "big failed"
+
+
+async def test_fallback_on_cut_off_only_for_auto() -> None:
+    """A cut-off small answer falls back for auto, but not when small was asked for."""
+    provider = PerModelProvider({"small": answer(truncated=True), "big": answer("From big")})
+    repository = InMemoryRequestRepository()
+    async with build_client(provider, repository, router=FixedRouter("small")) as client:
+        auto_response = await client.post("/v1/chat", json=AUTO_BODY)
+        small_response = await client.post("/v1/chat", json={**VALID_BODY, "model": "small"})
+    assert (auto_response.json()["model"], auto_response.json()["fallback_used"]) == ("big", True)
+    assert small_response.json()["truncated"] is True
+    auto_row, small_row = repository.records
+    assert (auto_row.status, auto_row.fallback_used) == ("ok", True)
+    assert (small_row.status, small_row.fallback_used) == ("truncated", False)
+
+
+OLD_REQUESTS_TABLE_SQL = """
+CREATE TABLE requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    model_name TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    question TEXT NOT NULL,
+    answer TEXT,
+    status TEXT NOT NULL,
+    error_type TEXT,
+    error_message TEXT,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    latency_ms REAL NOT NULL,
+    cost_usd REAL NOT NULL
+)
+"""
+
+
+async def test_sqlite_upgrades_old_database(tmp_path: Path) -> None:
+    """initialize() adds the routing columns to an old table and keeps its rows."""
+    database_path = tmp_path / "old.db"
+    async with aiosqlite.connect(database_path) as connection:
+        await connection.execute(OLD_REQUESTS_TABLE_SQL)
+        await connection.execute(
+            "INSERT INTO requests (created_at, model_name, model_id, question, answer, status, "
+            "input_tokens, output_tokens, latency_ms, cost_usd) "
+            "VALUES ('2026-11-25T10:00:00+00:00', 'big', 'm', 'old', 'a', 'ok', 1, 2, 3.0, 0.0)"
+        )
+        await connection.commit()
+    repository = SqliteRequestRepository(database_path)
+    await repository.initialize()
+    async with aiosqlite.connect(database_path) as connection:
+        async with connection.execute("PRAGMA table_info(requests)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+    assert {"requested_model", "route_reason", "fallback_used"} <= columns
+    await repository.add(
+        make_record(question="new", requested_model="auto", route_reason="r", fallback_used=True)
+    )
+    old_row, new_row = await repository.list_all()
+    assert (old_row.question, old_row.requested_model, old_row.route_reason) == ("old", "", "")
+    assert old_row.fallback_used is False
+    assert (new_row.requested_model, new_row.route_reason, new_row.fallback_used) == (
+        "auto",
+        "r",
+        True,
+    )
+
+
+def test_router_replay_counts_routing_fallback_and_cost() -> None:
+    """Replay uses saved outcomes per choice, falls back on small errors, and adds wasted cost."""
+
+    def outcome(question_id: str, text: str, status: str, cost: float) -> EvalOutcome:
+        """Build a saved outcome with a question text and cost."""
+        return make_outcome(question_id, status).model_copy(
+            update={"question": text, "cost_usd": cost}
+        )
+
+    small_run = make_run(
+        "small",
+        [
+            outcome("q001", "A", "passed", 0.001),
+            outcome("q002", "B", "failed", 0.001),
+            outcome("q003", "C", "error", 0.0005),
+            outcome("q004", "D", "passed", 0.001),
+        ],
+    )
+    big_run = make_run(
+        "big",
+        [
+            outcome("q001", "A", "passed", 0.01),
+            outcome("q002", "B", "passed", 0.01),
+            outcome("q003", "C", "passed", 0.01),
+            outcome("q004", "D", "failed", 0.01),
+        ],
+    )
+    router = QuestionRouter({"B"})
+    with_fallback = replay(small_run, big_run, router, fallback=True, split="all")
+    assert (with_fallback.to_small, with_fallback.to_big) == (3, 1)
+    assert (with_fallback.fallbacks, with_fallback.passed, with_fallback.total) == (1, 4, 4)
+    assert with_fallback.cost_usd == pytest.approx(0.001 + 0.01 + 0.0005 + 0.01 + 0.001)
+    without_fallback = replay(small_run, big_run, router, fallback=False, split="all")
+    assert (without_fallback.fallbacks, without_fallback.passed) == (0, 3)
+    assert without_fallback.cost_usd == pytest.approx(0.001 + 0.01 + 0.0005 + 0.001)
+    all_big, all_small = replay_baselines(small_run, big_run, split="all")
+    assert (all_big.to_big, all_big.passed, all_big.fallbacks) == (4, 3, 0)
+    assert all_big.cost_usd == pytest.approx(0.04)
+    assert (all_small.to_small, all_small.passed) == (4, 2)
+    assert all_small.cost_usd == pytest.approx(0.0035)
