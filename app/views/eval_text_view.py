@@ -51,7 +51,9 @@ def render_routing_lines(summary: EvalSummary) -> list[str]:
 
 
 def render_score(score: ScoreCount) -> str:
-    """Render passed/total with the percentage."""
+    """Render passed/total with the percentage, or n/a when the group has no questions."""
+    if score.total == 0:
+        return "n/a"
     return f"{score.passed}/{score.total} ({score.percent:.1f}%)"
 
 

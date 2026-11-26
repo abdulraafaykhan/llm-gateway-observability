@@ -1,11 +1,14 @@
 """Loads and validates the labelled eval set from a JSONL file."""
 
 import json
+import re
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from app.models.eval import EvalQuestion
+
+CHOICE_LETTER = re.compile(r"^[A-J]$")
 
 
 def load_eval_set(path: str) -> list[EvalQuestion]:
@@ -46,6 +49,10 @@ def _check_expected(question: EvalQuestion, where: str) -> None:
     """Make sure expected fits the check type."""
     if not question.expected:
         raise ValueError(f"{where}: expected must not be empty")
+    if question.check == "choice":
+        if len(question.expected) != 1 or not CHOICE_LETTER.fullmatch(question.expected[0]):
+            raise ValueError(f"{where}: a choice check needs exactly one letter A to J")
+        return
     if question.check != "number":
         return
     if len(question.expected) != 1:

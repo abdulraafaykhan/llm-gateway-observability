@@ -27,13 +27,14 @@ from app.routing.factory import build_rule_router
 from app.services.chat_service import ChatService
 from app.services.eval_checker import check_answer
 from app.services.eval_loader import load_eval_set
-from app.services.eval_report import compare_runs
+from app.services.eval_report import compare_runs, summarize
 from app.services.eval_runner import EvalRunner
 from app.services.load_plan import build_schedule
 from app.services.model_registry import ModelRegistry
 from app.services.router_replay import replay, replay_baselines
 from app.services.routing_config import load_routing_config, validate_routing_models
 from app.services.stats_service import StatsService, compute_group_stats, percentile
+from app.views.eval_text_view import render_eval_summary
 from app.views.stats_text_view import render_stats_report
 
 MODELS_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "models.toml"
@@ -891,3 +892,69 @@ def test_router_replay_counts_routing_fallback_and_cost() -> None:
     assert all_big.cost_usd == pytest.approx(0.04)
     assert (all_small.to_small, all_small.passed) == (4, 2)
     assert all_small.cost_usd == pytest.approx(0.0035)
+
+
+MMLU_PRO_PATH = Path(__file__).resolve().parent.parent / "eval" / "mmlu_pro_subset.jsonl"
+LOAD_QUESTIONS_PATH = Path(__file__).resolve().parent.parent / "config" / "load_questions.txt"
+MIXED_LOAD_PATH = Path(__file__).resolve().parent.parent / "config" / "load_questions_mixed.txt"
+
+
+def test_choice_check_reads_the_final_letter() -> None:
+    """The choice check takes the last 'Answer: X' line, or a last line that is just a letter."""
+    question = make_question(check="choice", expected=["C"])
+    for text in ("Some reasoning...\nAnswer: C", "**Answer: C**", "The answer is (c).", "…\nC"):
+        assert check_answer(question, text), text
+    for text in (
+        "Answer: B",
+        "I have no idea which one it is.",
+        "I think answer: c is likely, but not sure about the rest",
+    ):
+        assert not check_answer(question, text), text
+    two_lines = "Answer: A\nWait, let me recheck.\nAnswer: D"
+    assert check_answer(make_question(check="choice", expected=["D"]), two_lines)
+
+
+def test_loader_accepts_choice_and_the_mmlu_pro_file(tmp_path: Path) -> None:
+    """Choice keys must be one letter A-J; free-form categories load; the real file is valid."""
+    bad_path = tmp_path / "bad.jsonl"
+    bad_path.write_text(make_question(check="choice", expected=["K"]).model_dump_json())
+    with pytest.raises(ValueError):
+        load_eval_set(str(bad_path))
+    good = make_question(check="choice", expected=["C"], category="computer science")
+    good_path = tmp_path / "good.jsonl"
+    good_path.write_text(good.model_dump_json())
+    assert load_eval_set(str(good_path))[0].category == "computer science"
+
+    questions = load_eval_set(str(MMLU_PRO_PATH))
+    assert len(questions) == 100
+    assert len({question.id for question in questions}) == 100
+    assert all(question.check == "choice" for question in questions)
+    assert all(len(q.expected) == 1 and q.expected[0] in "ABCDEFGHIJ" for q in questions)
+    assert sum(1 for question in questions if question.split == "tune") == 50
+    assert sum(1 for question in questions if question.split == "test") == 50
+    assert len({question.category for question in questions}) >= 10
+    for question in questions:
+        lines = question.question.splitlines()
+        assert "Options:" in lines, question.id
+        assert any(line.startswith("A. ") for line in lines), question.id
+        assert any(line.startswith("J. ") for line in lines), question.id
+
+
+def test_eval_summary_shows_na_for_empty_groups() -> None:
+    """A run with only hard questions renders 'easy: n/a' instead of dividing by zero."""
+    run = make_run("small", [make_outcome("m001", "passed", "hard")])
+    text = render_eval_summary(summarize(run), "results/x.json")
+    assert "easy: n/a" in text
+    assert "hard: 1/1 (100.0%)" in text
+
+
+def test_mixed_load_file_routes_hard_lines_to_big() -> None:
+    """60 lines: the first 40 copy the base file, and the last 20 are all routed to big."""
+    lines = [line for line in MIXED_LOAD_PATH.read_text(encoding="utf-8").splitlines() if line]
+    base_lines = LOAD_QUESTIONS_PATH.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 60
+    assert lines[:40] == base_lines
+    router = build_rule_router(load_routing_config(str(ROUTING_CONFIG_PATH)))
+    for line in lines[40:]:
+        decision = router.choose([Message(role="user", content=line)])
+        assert decision.model_name == "big", (line, decision.reason)

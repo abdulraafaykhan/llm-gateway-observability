@@ -1,13 +1,13 @@
 """Data shapes for the labelled eval set, eval runs, summaries, and comparisons."""
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, StringConstraints
 
 Difficulty = Literal["easy", "hard"]
-Category = Literal["fact", "definition", "conversion", "math", "reasoning"]
+Category = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Split = Literal["tune", "test"]
-CheckType = Literal["contains_all", "contains_any", "number"]
+CheckType = Literal["contains_all", "contains_any", "number", "choice"]
 OutcomeStatus = Literal["passed", "failed", "error"]
 
 

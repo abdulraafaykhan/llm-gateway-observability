@@ -91,6 +91,23 @@ Fake-mode comparison against the baselines (start from a clean `data\fake.db` as
 
 Real-mode eval through the router: `uv run python -m app.cli.eval_cli --model auto --split test` (the summary adds a `routing:` line).
 
+## Harder eval set and mixed load
+
+`eval/mmlu_pro_subset.jsonl` holds 100 hard multiple-choice questions from MMLU-Pro (TIGER-Lab, MIT licence, https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro). Citation: Wang et al., "MMLU-Pro: A More Robust and Challenging Multi-Task Language Understanding Benchmark", 2024. It's a subset of about 7 questions per category (seed 42, 10-option questions only), graded with the `choice` check: the last `Answer: X` line, or a last line that is just the letter. A few answer keys in the public dataset may be wrong, so check the "neither passed" list.
+
+It was built once with `uv run --no-project --with datasets python scripts/build_mmlu_pro_subset.py`. The script is a one-off; `datasets` is not a project dependency.
+
+    uv run python -m app.cli.eval_cli --eval-set eval/mmlu_pro_subset.jsonl --validate-only
+    uv run python -m app.cli.eval_cli --eval-set eval/mmlu_pro_subset.jsonl --model small --label small-mmlu
+    uv run python -m app.cli.eval_cli --eval-set eval/mmlu_pro_subset.jsonl --model big --label big-mmlu
+    uv run python -m app.cli.eval_compare_cli results\eval_small-mmlu_<stamp>.json results\eval_big-mmlu_<stamp>.json
+    uv run python -m app.cli.router_replay_cli --small results\eval_small-mmlu_<stamp>.json --big results\eval_big-mmlu_<stamp>.json --split tune
+
+`config/load_questions_mixed.txt` is the 40 everyday load questions plus 20 harder ones that the router sends to big. Use the same file for the baseline run and the router run so they are comparable:
+
+    uv run python -m app.cli.load_test_cli --scenario spike --questions config/load_questions_mixed.txt
+    uv run python -m app.cli.load_test_cli --scenario spike --questions config/load_questions_mixed.txt --model auto
+
 ## Layout
 
 - `config/` model entries (`models.toml`); the table key (`small`, `big`) is the model name; also routing rules (`routing.toml`), fake-mode profiles (`fake.toml`) and load test questions (`load_questions.txt`)
@@ -101,7 +118,8 @@ Real-mode eval through the router: `uv run python -m app.cli.eval_cli --model au
 - `app/services/` the logic: chat, model registry, routing config, router replay, stats, fake profiles, load plan, and eval (loader, checker, runner, report)
 - `app/cli/` command-line entry points (stats, load test, eval, eval compare, router replay)
 - `app/clients/` HTTP client the eval uses to call the gateway, behind the `GatewayClient` interface
-- `eval/` the labelled eval set (`eval_set.jsonl`)
+- `eval/` the labelled eval sets (`eval_set.jsonl`, `mmlu_pro_subset.jsonl`)
+- `scripts/` one-off data builders (not part of the app)
 - `results/` saved stats reports and eval runs
 - `app/providers/` adapters to AI companies behind the `LLMProvider` interface
 - `app/repositories/` storage for request records behind the `RequestRepository` interface (SQLite)
