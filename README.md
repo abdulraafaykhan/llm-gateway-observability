@@ -56,19 +56,37 @@ The `$env:` settings stay for the whole terminal session. Before the real-mode c
 
 Other load options: `--model small|big`, `--seed N`, `--base-url URL`, `--questions PATH`. Non-smoke scenarios refuse to run against a real-mode gateway unless you pass `--allow-real`.
 
+## Eval
+
+`eval/eval_set.jsonl` holds 100 labelled questions (easy/hard, tune/test). The gateway must run in real mode; the eval refuses a fake-mode gateway.
+
+    uv run python -m app.cli.eval_cli --validate-only
+    uv run python -m app.cli.eval_cli --model small --limit 5
+    uv run python -m app.cli.eval_cli --model small
+    uv run python -m app.cli.eval_cli --model big
+    uv run python -m app.cli.eval_compare_cli results\eval_small_<stamp>.json results\eval_big_<stamp>.json
+
+Each run saves its per-question results to `results/eval_<label>_<stamp>.json`. Other options: `--split tune|test`, `--concurrency N` (use 1 if rate limits cause errors), `--retries N`, `--label NAME`.
+
+- Eval requests are recorded in the database like any other request, so use `--minutes` in the stats command to separate them.
+- Grading uses plain rules, not an AI judge. The number check is lenient: any number in the answer that equals the key counts.
+- Results vary slightly between runs, even at temperature 0.
+
 ## Layout
 
 - `config/` model entries (`models.toml`); the table key (`small`, `big`) is the model name; also fake-mode profiles (`fake.toml`) and load test questions (`load_questions.txt`)
 - `app/models/` plain data shapes used inside the app (Pydantic only)
 - `app/views/` request and response shapes for the API, including errors
 - `app/controllers/` FastAPI routers; receive a request, call a service, return a view
-- `app/services/` the logic: `ChatService`, `ModelRegistry`, and `StatsService`
-- `app/cli/` command-line entry points (stats and load test)
-- `results/` saved stats reports from load test runs
+- `app/services/` the logic: chat, model registry, stats, fake profiles, load plan, and eval (loader, checker, runner, report)
+- `app/cli/` command-line entry points (stats, load test, eval, eval compare)
+- `app/clients/` HTTP client the eval uses to call the gateway, behind the `GatewayClient` interface
+- `eval/` the labelled eval set (`eval_set.jsonl`)
+- `results/` saved stats reports and eval runs
 - `app/providers/` adapters to AI companies behind the `LLMProvider` interface
 - `app/repositories/` storage for request records behind the `RequestRepository` interface (SQLite)
 - `app/dependencies.py` the only place where objects are wired together
 - `data/` the SQLite request log (`gateway.db`), created at startup and git-ignored
 - `tests/` tests that use a fake provider and an in-memory repository (no network)
 
-Planned for later parts (not built yet): eval set, router service, cache service, dashboard.
+Planned for later parts (not built yet): router service, cache service, dashboard.

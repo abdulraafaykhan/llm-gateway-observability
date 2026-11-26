@@ -8,9 +8,11 @@ from typing import Any
 import httpx
 import pytest
 
+from app.clients.base import GatewayClient
 from app.dependencies import get_chat_service
 from app.main import create_app
 from app.models.completion import CompletionResult, Message
+from app.models.eval import EvalOutcome, EvalQuestion, EvalRunResult, GatewayReply
 from app.models.fake_profile import FakeProfile
 from app.models.model_spec import ModelSpec
 from app.models.request_record import RequestRecord
@@ -19,6 +21,10 @@ from app.providers.base import LLMProvider, ProviderError
 from app.repositories.base import RequestRepository
 from app.repositories.sqlite_repository import SqliteRequestRepository
 from app.services.chat_service import ChatService
+from app.services.eval_checker import check_answer
+from app.services.eval_loader import load_eval_set
+from app.services.eval_report import compare_runs
+from app.services.eval_runner import EvalRunner
 from app.services.load_plan import build_schedule
 from app.services.model_registry import ModelRegistry
 from app.services.stats_service import StatsService, compute_group_stats, percentile
@@ -396,3 +402,202 @@ def test_build_schedule_is_repeatable_and_sized_per_scenario() -> None:
     assert 70 <= len(build_schedule("normal", 42)) <= 170
     with pytest.raises(ValueError):
         build_schedule("unknown", 42)
+
+
+EVAL_SET_PATH = Path(__file__).resolve().parent.parent / "eval" / "eval_set.jsonl"
+
+
+def make_question(**changes: Any) -> EvalQuestion:
+    """Build an eval question for tests; keyword arguments replace the defaults."""
+    fields: dict[str, Any] = {
+        "id": "q001",
+        "question": "What is the capital of Japan?",
+        "difficulty": "easy",
+        "category": "fact",
+        "split": "tune",
+        "check": "contains_all",
+        "expected": ["tokyo"],
+    }
+    fields.update(changes)
+    return EvalQuestion(**fields)
+
+
+def make_outcome(question_id: str, status: str, difficulty: str = "easy") -> EvalOutcome:
+    """Build a graded outcome for comparison tests."""
+    return EvalOutcome(
+        **make_question(id=question_id, difficulty=difficulty).model_dump(),
+        status=status,
+        truncated=False,
+        answer=None if status == "error" else "Tokyo",
+        answered_by=None if status == "error" else "small",
+        input_tokens=0,
+        output_tokens=0,
+        latency_ms=None,
+        cost_usd=0.0,
+        error_message="http 502: boom" if status == "error" else None,
+        attempts=1,
+    )
+
+
+def make_run(label: str, outcomes: list[EvalOutcome]) -> EvalRunResult:
+    """Wrap outcomes in a saved-run shape."""
+    return EvalRunResult(
+        label=label,
+        model_requested=label,
+        created_at="2026-11-26T08:00:00+00:00",
+        split_filter="all",
+        eval_set_path="eval/eval_set.jsonl",
+        outcomes=outcomes,
+    )
+
+
+def test_check_answer_rules_and_normalization() -> None:
+    """Text checks ignore case, markdown, and special hyphens; number checks are lenient."""
+    any_question = make_question(check="contains_any", expected=["leonardo", "da vinci"])
+    assert check_answer(any_question, "It was painted by Da Vinci.")
+    assert not check_answer(any_question, "Michelangelo")
+    all_question = make_question(expected=["new", "york"])
+    assert check_answer(all_question, "NEW YORK")
+    assert not check_answer(all_question, "New Jersey")
+    assert check_answer(make_question(), "**Tokyo**")
+    assert check_answer(make_question(expected=["x-ray"]), "An X\u2011ray")
+    thousand = make_question(check="number", expected=["1234"])
+    assert check_answer(thousand, "The total is 1,234 dollars.")
+    assert check_answer(thousand, "The total is 1\u202f234.")
+    decimal = make_question(check="number", expected=["12.5"])
+    assert check_answer(decimal, "The answer is 12.50")
+    assert not check_answer(decimal, "The answer is 13")
+    assert not check_answer(decimal, "I am not sure.")
+
+
+def test_load_eval_set_validates_lines(tmp_path: Path) -> None:
+    """A valid file loads; repeated ids, unknown checks, and non-numeric keys are rejected."""
+    lines = [
+        make_question(id="q001").model_dump_json(),
+        "",
+        make_question(id="q002", check="number", expected=["391"]).model_dump_json(),
+        make_question(id="q003", check="contains_any").model_dump_json(),
+    ]
+    valid_path = tmp_path / "valid.jsonl"
+    valid_path.write_text("\n".join(lines), encoding="utf-8")
+    assert [question.id for question in load_eval_set(str(valid_path))] == [
+        "q001",
+        "q002",
+        "q003",
+    ]
+    bad_lines = {
+        "repeated.jsonl": [lines[0], lines[0]],
+        "unknown_check.jsonl": [lines[0].replace("contains_all", "regex")],
+        "not_numeric.jsonl": [lines[2].replace('"391"', '"many"')],
+    }
+    for name, content in bad_lines.items():
+        bad_path = tmp_path / name
+        bad_path.write_text("\n".join(content), encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_eval_set(str(bad_path))
+
+
+def test_real_eval_set_has_balanced_cells() -> None:
+    """The shipped eval set has 100 unique questions, 50 easy, 50 hard, 25 per cell."""
+    questions = load_eval_set(str(EVAL_SET_PATH))
+    assert len(questions) == 100
+    assert len({question.id for question in questions}) == 100
+    assert sum(1 for question in questions if question.difficulty == "easy") == 50
+    assert sum(1 for question in questions if question.difficulty == "hard") == 50
+    for difficulty in ("easy", "hard"):
+        for split in ("tune", "test"):
+            cell = [q for q in questions if q.difficulty == difficulty and q.split == split]
+            assert len(cell) == 25, (difficulty, split)
+
+
+class ScriptedGatewayClient(GatewayClient):
+    """Gateway client that returns a fixed reply per question text and counts calls."""
+
+    def __init__(self, replies: dict[str, GatewayReply]) -> None:
+        self.replies: dict[str, GatewayReply] = replies
+        self.calls: dict[str, int] = {}
+
+    async def ask(self, question: str, model: str) -> GatewayReply:
+        """Return the scripted reply for this question."""
+        self.calls[question] = self.calls.get(question, 0) + 1
+        return self.replies[question]
+
+
+def make_reply(
+    http_status: int = 200, answer: str | None = "Tokyo", **changes: Any
+) -> GatewayReply:
+    """Build a gateway reply for runner tests."""
+    fields: dict[str, Any] = {
+        "http_status": http_status,
+        "answer": answer if http_status == 200 else None,
+        "model": "small" if http_status == 200 else None,
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "latency_ms": 100.0,
+        "truncated": False,
+        "error_message": None if http_status == 200 else "boom",
+    }
+    fields.update(changes)
+    return GatewayReply(**fields)
+
+
+async def test_eval_runner_grades_and_retries() -> None:
+    """Passed, failed, truncated, retried 502 error, and non-retried 400 error outcomes."""
+    replies = {
+        "correct": make_reply(answer="Tokyo"),
+        "wrong": make_reply(answer="Kyoto"),
+        "cut off": make_reply(answer="Tokyo", truncated=True),
+        "server error": make_reply(502),
+        "bad request": make_reply(400),
+    }
+    questions = [
+        make_question(id=f"q{index:03d}", question=text) for index, text in enumerate(replies)
+    ]
+    runner = EvalRunner(
+        client=ScriptedGatewayClient(replies),
+        registry=ModelRegistry(MODELS_CONFIG_PATH),
+        concurrency=2,
+        retries=2,
+        retry_wait_seconds=0,
+    )
+    run = await runner.run(questions, "small", "small", "all", "test.jsonl")
+    outcomes = {outcome.question: outcome for outcome in run.outcomes}
+    assert [outcome.question for outcome in run.outcomes] == list(replies)
+    assert outcomes["correct"].status == "passed"
+    assert outcomes["correct"].cost_usd > 0
+    assert outcomes["wrong"].status == "failed"
+    assert (outcomes["cut off"].status, outcomes["cut off"].truncated) == ("failed", True)
+    assert (outcomes["server error"].status, outcomes["server error"].attempts) == ("error", 3)
+    assert (outcomes["bad request"].status, outcomes["bad request"].attempts) == ("error", 1)
+
+
+def test_compare_runs_groups_shared_questions() -> None:
+    """Groups are counted on shared ids only, and errors count as not passed."""
+    run_a = make_run(
+        "small",
+        [
+            make_outcome("q001", "passed"),
+            make_outcome("q002", "failed", "hard"),
+            make_outcome("q003", "passed"),
+            make_outcome("q004", "error", "hard"),
+            make_outcome("q005", "passed"),
+        ],
+    )
+    run_b = make_run(
+        "big",
+        [
+            make_outcome("q001", "passed"),
+            make_outcome("q002", "passed", "hard"),
+            make_outcome("q003", "failed"),
+            make_outcome("q004", "failed", "hard"),
+            make_outcome("q099", "passed"),
+        ],
+    )
+    report = compare_runs(run_a, run_b)
+    assert (report.compared, report.only_in_a, report.only_in_b) == (4, 1, 1)
+    assert report.both_passed.count == 1
+    assert (report.only_b_passed.count, report.only_b_passed.hard) == (1, 1)
+    assert report.only_a_passed.count == 1
+    assert (report.both_not_passed.count, report.both_not_passed.hard) == (1, 1)
+    assert report.score_a_percent == pytest.approx(50.0)
+    assert report.score_b_percent == pytest.approx(50.0)
