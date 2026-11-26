@@ -16,6 +16,7 @@ from app.repositories.sqlite_repository import SqliteRequestRepository
 from app.routing.base import Router
 from app.routing.factory import build_rule_router
 from app.services.chat_service import ChatService
+from app.services.dashboard_service import DashboardService
 from app.services.fake_profiles import load_fake_profiles
 from app.services.model_registry import ModelRegistry
 from app.services.routing_config import load_routing_config
@@ -50,6 +51,22 @@ def get_llm_provider() -> LLMProvider:
 def get_request_repository() -> RequestRepository:
     """Return the request repository, built once from the configured database path."""
     return SqliteRequestRepository(Path(get_settings().database_path))
+
+
+def sqlite_repository_factory(path: Path) -> RequestRepository:
+    """Build a SQLite repository for a dashboard source; the dashboard only reads from it."""
+    return SqliteRequestRepository(path)
+
+
+@lru_cache
+def get_dashboard_service() -> DashboardService:
+    """Return the dashboard service, built once from settings."""
+    settings = get_settings()
+    return DashboardService(
+        data_dir=settings.dashboard_data_dir,
+        default_database_path=settings.database_path,
+        repository_factory=sqlite_repository_factory,
+    )
 
 
 @lru_cache

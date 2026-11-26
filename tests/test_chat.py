@@ -1,7 +1,9 @@
 """Tests for POST /v1/chat and the request log (no network, no API key)."""
 
 import asyncio
+import itertools
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +12,7 @@ import httpx
 import pytest
 
 from app.clients.base import GatewayClient
-from app.dependencies import get_chat_service
+from app.dependencies import get_chat_service, get_dashboard_service, sqlite_repository_factory
 from app.main import create_app
 from app.models.completion import CompletionResult, Message
 from app.models.eval import EvalOutcome, EvalQuestion, EvalRunResult, GatewayReply
@@ -26,6 +28,7 @@ from app.routing.base import Router
 from app.routing.factory import build_rule_router
 from app.services.cascade_replay import build_cascade_table, escalate
 from app.services.chat_service import ChatService
+from app.services.dashboard_service import DashboardService
 from app.services.eval_checker import check_answer
 from app.services.eval_loader import load_eval_set
 from app.services.eval_report import compare_runs, summarize
@@ -1077,3 +1080,173 @@ def test_cascade_token_stats_and_rendering() -> None:
         assert f"  {label}" in text
     assert "SMALL'S OUTPUT TOKENS (answered questions): p50 50 | p75 80 | p90 90 | max 100" in text
     assert text.count("NOTES") == 1
+
+
+DASHBOARD_STATIC_DIR = Path(__file__).resolve().parent.parent / "app" / "static" / "dashboard"
+
+
+def minutes_ago(minutes: float) -> str:
+    """Return a UTC ISO time the given number of minutes before now."""
+    return (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
+
+
+async def make_dashboard_db(path: Path, records: list[RequestRecord]) -> None:
+    """Create a real SQLite request log with the given records."""
+    repository = SqliteRequestRepository(path)
+    await repository.initialize()
+    for record in records:
+        await repository.add(record)
+
+
+def dashboard_client(data_dir: Path, default_name: str = "gateway.db") -> httpx.AsyncClient:
+    """Build a client for an app whose dashboard reads the given folder."""
+    app = create_app()
+    service = DashboardService(
+        str(data_dir), str(data_dir / default_name), sqlite_repository_factory
+    )
+    app.dependency_overrides[get_dashboard_service] = lambda: service
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+
+
+async def test_dashboard_sources_and_name_safety(tmp_path: Path) -> None:
+    """Only .db files directly in the folder are sources; anything else is rejected."""
+    await make_dashboard_db(tmp_path / "gateway.db", [make_record()])
+    await make_dashboard_db(tmp_path / "fake.db", [make_record()])
+    (tmp_path / "notes.txt").write_text("not a database", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    await make_dashboard_db(tmp_path / "sub" / "inner.db", [make_record()])
+    async with dashboard_client(tmp_path) as client:
+        body = (await client.get("/api/dashboard/sources")).json()
+        assert [source["name"] for source in body["sources"]] == ["fake.db", "gateway.db"]
+        assert body["default"] == "gateway.db"
+        assert [source["is_default"] for source in body["sources"]] == [False, True]
+        for bad in ("nope.db", "../x.db", "a/b.db", "x.txt", "inner.db"):
+            response = await client.get("/api/dashboard/summary", params={"source": bad})
+            assert response.status_code == 400, bad
+            assert response.json()["error"]["type"] == "unknown_source"
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    async with dashboard_client(empty_dir) as client:
+        assert (await client.get("/api/dashboard/sources")).json()["sources"] == []
+        for path in ("summary", "timeseries", "requests"):
+            response = await client.get(f"/api/dashboard/{path}")
+            assert response.status_code == 404, path
+            assert response.json()["error"]["type"] == "no_data"
+
+
+async def test_dashboard_summary_matches_the_stats_numbers(tmp_path: Path) -> None:
+    """The summary equals compute_group_stats for the same rows, and minutes drops old rows."""
+    recent_records = [
+        make_record(created_at=minutes_ago(5), model_name="big", latency_ms=900.0, cost_usd=0.002),
+        make_record(created_at=minutes_ago(10), model_name="small", latency_ms=300.0),
+        make_record(
+            created_at=minutes_ago(15), model_name="small", status="truncated", latency_ms=700.0
+        ),
+        make_record(
+            created_at=minutes_ago(20), status="error", answer=None, latency_ms=5000.0, cost_usd=0.0
+        ),
+    ]
+    old_record = make_record(created_at=minutes_ago(180), latency_ms=100.0, cost_usd=0.5)
+    await make_dashboard_db(tmp_path / "gateway.db", [old_record, *recent_records])
+    async with dashboard_client(tmp_path) as client:
+        everything = (await client.get("/api/dashboard/summary")).json()
+        last_hour = (await client.get("/api/dashboard/summary", params={"minutes": 60})).json()
+    for body, records in ((everything, [old_record, *recent_records]), (last_hour, recent_records)):
+        expected = compute_group_stats(records)
+        overall = body["overall"]
+        assert (overall["requests"], overall["answered"], overall["errors"]) == (
+            expected.requests,
+            expected.answered,
+            expected.errors,
+        )
+        assert overall["total_cost_usd"] == pytest.approx(expected.total_cost_usd)
+        assert expected.latency is not None
+        assert overall["latency"]["p95_ms"] == expected.latency.p95_ms
+    assert last_hour["overall"]["requests"] == 4
+    assert set(last_hour["by_model"]) == {"big", "small"}
+
+
+async def test_dashboard_timeseries_buckets(tmp_path: Path) -> None:
+    """Buckets are epoch-aligned and gap-free, sum to the rows, and widen for long ranges."""
+    records = [make_record(created_at=minutes_ago(offset)) for offset in (1, 1.1, 2, 5, 8)]
+    await make_dashboard_db(tmp_path / "gateway.db", records)
+    async with dashboard_client(tmp_path) as client:
+        body = (await client.get("/api/dashboard/timeseries", params={"minutes": 10})).json()
+    size = body["bucket_seconds"]
+    starts = [datetime.fromisoformat(bucket["start"]).timestamp() for bucket in body["buckets"]]
+    assert size == 10
+    assert all(start % size == 0 for start in starts)
+    assert all(later - earlier == size for earlier, later in itertools.pairwise(starts))
+    assert sum(bucket["requests"] for bucket in body["buckets"]) == len(records)
+    empty_buckets = [bucket for bucket in body["buckets"] if bucket["requests"] == 0]
+    assert empty_buckets and all(bucket["p95_ms"] is None for bucket in empty_buckets)
+
+    long_dir = tmp_path / "long"
+    long_dir.mkdir()
+    days = [make_record(created_at=minutes_ago(day * 1440)) for day in (0, 1, 2, 3)]
+    await make_dashboard_db(long_dir / "gateway.db", days)
+    async with dashboard_client(long_dir) as client:
+        long_body = (await client.get("/api/dashboard/timeseries")).json()
+    assert long_body["bucket_seconds"] > size
+    assert len(long_body["buckets"]) <= 120
+    assert sum(bucket["requests"] for bucket in long_body["buckets"]) == len(days)
+
+
+async def test_dashboard_requests_page_and_static_files(tmp_path: Path) -> None:
+    """Requests come newest first with routing fields; the page and assets are safe to serve."""
+    records = [
+        make_record(created_at=minutes_ago(3), question="oldest"),
+        make_record(created_at=minutes_ago(2), question="middle"),
+        make_record(
+            created_at=minutes_ago(1),
+            question="newest",
+            requested_model="auto",
+            route_reason="score 0 (threshold 2): no rules matched",
+            fallback_used=True,
+        ),
+    ]
+    await make_dashboard_db(tmp_path / "gateway.db", records)
+    async with dashboard_client(tmp_path) as client:
+        items = (await client.get("/api/dashboard/requests", params={"limit": 2})).json()["items"]
+        page = await client.get("/dashboard")
+        script = await client.get("/dashboard/assets/dashboard.js")
+        styles = await client.get("/dashboard/assets/dashboard.css")
+    assert [item["question"] for item in items] == ["newest", "middle"]
+    assert (items[0]["requested_model"], items[0]["fallback_used"]) == ("auto", True)
+    assert items[0]["route_reason"] == "score 0 (threshold 2): no rules matched"
+    assert page.status_code == 200 and page.headers["content-type"].startswith("text/html")
+    assert script.status_code == 200 and styles.status_code == 200
+    for path in DASHBOARD_STATIC_DIR.iterdir():
+        text = path.read_text(encoding="utf-8").replace("http://www.w3.org/2000/svg", "")
+        assert "http://" not in text and "https://" not in text, path.name
+    script_text = (DASHBOARD_STATIC_DIR / "dashboard.js").read_text(encoding="utf-8")
+    for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+        assert forbidden not in script_text, forbidden
+
+
+async def table_snapshot(path: Path) -> tuple[int, list[str]]:
+    """Return the row count of requests and the sorted table names."""
+    async with aiosqlite.connect(path) as connection:
+        async with connection.execute("SELECT COUNT(*) FROM requests") as cursor:
+            row_count = (await cursor.fetchone() or (0,))[0]
+        async with connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+        ) as cursor:
+            tables = [row[0] for row in await cursor.fetchall()]
+    return row_count, tables
+
+
+async def test_dashboard_never_writes(tmp_path: Path) -> None:
+    """Calling every dashboard endpoint leaves the rows, tables, and .db file list unchanged."""
+    database_path = tmp_path / "gateway.db"
+    await make_dashboard_db(database_path, [make_record(created_at=minutes_ago(1))])
+    before = await table_snapshot(database_path)
+    files_before = sorted(path.name for path in tmp_path.glob("*.db"))
+    async with dashboard_client(tmp_path) as client:
+        for path in ("sources", "summary", "timeseries", "requests"):
+            assert (await client.get(f"/api/dashboard/{path}")).status_code == 200, path
+        assert (
+            await client.get("/api/dashboard/summary", params={"minutes": 5})
+        ).status_code == 200
+    assert await table_snapshot(database_path) == before
+    assert sorted(path.name for path in tmp_path.glob("*.db")) == files_before

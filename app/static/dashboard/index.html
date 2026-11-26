@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM Gateway dashboard</title>
+  <link rel="stylesheet" href="/dashboard/assets/dashboard.css">
+</head>
+<body>
+  <header class="header">
+    <h1>LLM Gateway dashboard</h1>
+    <div class="controls">
+      <label class="control">
+        <span>Database</span>
+        <select id="source" aria-label="Database file"></select>
+      </label>
+      <div class="ranges" role="group" aria-label="Time range">
+        <button type="button" data-range="15m" aria-pressed="false">15 min</button>
+        <button type="button" data-range="1h" aria-pressed="false">1 hour</button>
+        <button type="button" data-range="24h" aria-pressed="false">24 hours</button>
+        <button type="button" data-range="all" aria-pressed="false">All time</button>
+      </div>
+      <button type="button" id="live" aria-pressed="false">Live: off</button>
+      <span id="updated" class="muted" aria-live="polite">Updated -</span>
+      <span id="mode" class="chip">Gateway mode: -</span>
+    </div>
+  </header>
+
+  <main>
+    <p id="error" class="error" role="alert" hidden></p>
+    <p id="banner" class="banner" hidden>SIMULATED DATA: this database was produced in fake mode.</p>
+    <p id="no-sources" class="empty" hidden>No database files found in the data folder.</p>
+
+    <div id="content">
+      <section aria-label="Summary">
+        <div id="cards" class="cards"></div>
+      </section>
+
+      <p id="empty" class="empty" hidden>No requests in this range.</p>
+
+      <div id="charts" class="charts">
+        <section class="panel">
+          <h2>Latency by model</h2>
+          <div id="chart-latency" class="chart-box"></div>
+        </section>
+        <section class="panel">
+          <h2>Requests over time</h2>
+          <div id="chart-requests" class="chart-box"></div>
+          <h3>p95 latency over time</h3>
+          <div id="chart-p95" class="chart-box"></div>
+        </section>
+        <section class="panel">
+          <h2>Cost by model</h2>
+          <div id="chart-cost" class="chart-box"></div>
+        </section>
+      </div>
+
+      <section class="panel">
+        <h2>By model</h2>
+        <div class="table-wrap">
+          <table id="table-models">
+            <thead>
+              <tr>
+                <th scope="col">Model</th><th scope="col">Requests</th><th scope="col">Answered</th>
+                <th scope="col">Truncated</th><th scope="col">Errors</th><th scope="col">Error rate</th>
+                <th scope="col">Tokens in</th><th scope="col">Tokens out</th><th scope="col">Total cost</th>
+                <th scope="col">Cost per 1,000 answered</th><th scope="col">p50</th>
+                <th scope="col">p95</th><th scope="col">p99</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Recent requests</h2>
+        <p class="muted">Select a row (or press Enter on it) to see the question and answer.</p>
+        <div class="table-wrap">
+          <table id="table-recent">
+            <thead>
+              <tr>
+                <th scope="col">Time</th><th scope="col">Answered by</th><th scope="col">Asked for</th>
+                <th scope="col">Status</th><th scope="col">Route reason</th><th scope="col">Fallback</th>
+                <th scope="col">Tokens in</th><th scope="col">Tokens out</th>
+                <th scope="col">Latency</th><th scope="col">Cost</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="/dashboard/assets/dashboard.js"></script>
+</body>
+</html>

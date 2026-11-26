@@ -8,7 +8,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
-from app.controllers import chat_controller, health_controller, request_log_controller
+from app.controllers import (
+    chat_controller,
+    dashboard_controller,
+    health_controller,
+    request_log_controller,
+)
 from app.dependencies import (
     get_llm_provider,
     get_model_registry,
@@ -17,6 +22,7 @@ from app.dependencies import (
     get_routing_config,
 )
 from app.providers.base import ProviderError
+from app.services.dashboard_service import NoDataError, UnknownSourceError
 from app.services.model_registry import UnknownModelError
 from app.services.routing_config import validate_routing_models
 from app.views.error_view import ErrorDetail, ErrorResponse
@@ -68,14 +74,27 @@ async def handle_provider_error(request: Request, error: ProviderError) -> JSONR
     return error_response(502, "provider_error", str(error))
 
 
+async def handle_unknown_source(request: Request, error: UnknownSourceError) -> JSONResponse:
+    """Return 400 when the dashboard is asked for a database file that is not listed."""
+    return error_response(400, "unknown_source", str(error))
+
+
+async def handle_no_data(request: Request, error: NoDataError) -> JSONResponse:
+    """Return 404 when the dashboard's data folder has no database files."""
+    return error_response(404, "no_data", str(error))
+
+
 def create_app() -> FastAPI:
     """Create the FastAPI app with routers and exception handlers."""
     app = FastAPI(title="LLM Gateway", lifespan=lifespan)
     app.include_router(chat_controller.router)
     app.include_router(health_controller.router)
     app.include_router(request_log_controller.router)
+    app.include_router(dashboard_controller.router)
     app.add_exception_handler(UnknownModelError, handle_unknown_model)
     app.add_exception_handler(ProviderError, handle_provider_error)
+    app.add_exception_handler(UnknownSourceError, handle_unknown_source)
+    app.add_exception_handler(NoDataError, handle_no_data)
     return app
 
 
