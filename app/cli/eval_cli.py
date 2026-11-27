@@ -47,6 +47,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--concurrency", type=positive_int, default=2)
     parser.add_argument("--retries", type=non_negative_int, default=2)
     parser.add_argument("--retry-wait-seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--min-interval-seconds",
+        type=float,
+        default=0.0,
+        help="minimum seconds between request starts (only with --concurrency 1)",
+    )
     parser.add_argument("--validate-only", action="store_true", help="check the file and exit")
     args = parser.parse_args(argv)
     if not args.validate_only and args.model is None:
@@ -94,19 +100,24 @@ async def run_eval(args: argparse.Namespace, questions: list[EvalQuestion]) -> i
             concurrency=args.concurrency,
             retries=args.retries,
             retry_wait_seconds=args.retry_wait_seconds,
+            min_interval_seconds=args.min_interval_seconds,
+            log=print,
         )
         print(f"running {len(questions)} questions against model '{args.model}'...")
         run = await runner.run(
             questions, args.model, args.label or args.model, args.split, args.eval_set
         )
     saved_path = save_run(run)
-    print(render_eval_summary(summarize(run), str(saved_path)))
+    print(render_eval_summary(summarize(run), str(saved_path), runner.rate_limit_retries))
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     """Run the eval command and return the process exit code."""
     args = parse_args(argv)
+    if args.min_interval_seconds > 0 and args.concurrency != 1:
+        print("--min-interval-seconds is only allowed with --concurrency 1", file=sys.stderr)
+        return 1
     try:
         questions = load_eval_set(args.eval_set)
     except (FileNotFoundError, ValueError) as error:

@@ -12,6 +12,7 @@ import aiosqlite
 import httpx
 import pytest
 
+from app.cli import eval_cli
 from app.clients.base import GatewayClient
 from app.config import Settings
 from app.dependencies import (
@@ -661,6 +662,77 @@ async def test_eval_runner_grades_and_retries() -> None:
     assert (outcomes["cut off"].status, outcomes["cut off"].truncated) == ("failed", True)
     assert (outcomes["server error"].status, outcomes["server error"].attempts) == ("error", 3)
     assert (outcomes["bad request"].status, outcomes["bad request"].attempts) == ("error", 1)
+
+
+class SequenceGatewayClient(GatewayClient):
+    """Gateway client that returns the next reply from a list on each call."""
+
+    def __init__(self, replies: list[GatewayReply]) -> None:
+        self.replies: list[GatewayReply] = replies
+        self.questions: list[str] = []
+
+    async def ask(self, question: str, model: str) -> GatewayReply:
+        """Record the question and return the next scripted reply."""
+        self.questions.append(question)
+        return self.replies.pop(0)
+
+
+async def test_eval_runner_retries_rate_limits_and_paces(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Gemini quota 502s are retried via the injected sleep; starts are paced; bad combo refused."""
+    quota = "Gemini API error (HTTP 429): You exceeded your current quota, please check your plan."
+    assert classify_failure(quota) == "rate_limit"
+    client = SequenceGatewayClient(
+        [
+            make_reply(502, error_message=quota),
+            make_reply(502, error_message=quota),
+            make_reply(answer="Tokyo"),
+            make_reply(answer="Tokyo"),
+        ]
+    )
+    now = [0.0]
+    waits: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        """Record the wait and move the fake clock forward instead of sleeping."""
+        waits.append(seconds)
+        now[0] += seconds
+
+    logged: list[str] = []
+    runner = EvalRunner(
+        client=client,
+        concurrency=1,
+        retries=2,
+        retry_wait_seconds=20.0,
+        min_interval_seconds=5.0,
+        sleep=fake_sleep,
+        clock=lambda: now[0],
+        log=logged.append,
+    )
+    questions = [make_question(id="q000", question="a"), make_question(id="q001", question="b")]
+    run = await runner.run(questions, "gem-lite", "gem-lite", "all", "test.jsonl")
+    first, second = run.outcomes
+    assert (first.status, first.answer, first.attempts) == ("passed", "Tokyo", 3)
+    assert (second.status, second.attempts) == ("passed", 1)
+    assert client.questions == ["a", "a", "a", "b"]
+    assert runner.rate_limit_retries == 2
+    assert logged == [
+        "retrying q000 in 20 s (attempt 2 of 3)",
+        "retrying q000 in 20 s (attempt 3 of 3)",
+    ]
+    assert waits == [20.0, 20.0, 5.0]
+    summary_text = render_eval_summary(summarize(run), "results/x.json", runner.rate_limit_retries)
+    assert "  rate-limit retries: 2" in summary_text.splitlines()
+
+    with pytest.raises(ValueError, match="--concurrency 1"):
+        EvalRunner(client, concurrency=2, retries=2, retry_wait_seconds=1, min_interval_seconds=1)
+    exit_code = eval_cli.main(
+        ["--model", "small", "--concurrency", "2", "--min-interval-seconds", "5"]
+    )
+    error_lines = capsys.readouterr().err.strip().splitlines()
+    assert exit_code == 1
+    assert error_lines == ["--min-interval-seconds is only allowed with --concurrency 1"]
 
 
 def test_compare_runs_groups_shared_questions() -> None:

@@ -14,8 +14,13 @@ from app.models.eval import (
 SNIPPET_LENGTH: int = 80
 
 
-def render_eval_summary(summary: EvalSummary, saved_path: str) -> str:
-    """Render one run's score, counts, cost, latency, failures, and errors."""
+def render_eval_summary(
+    summary: EvalSummary, saved_path: str, rate_limit_retries: int | None = None
+) -> str:
+    """Render one run's score, counts, cost, latency, retries, failures, and errors."""
+    retry_lines = (
+        [] if rate_limit_retries is None else [f"  rate-limit retries: {rate_limit_retries}"]
+    )
     lines = [
         f"EVAL RESULT  |  label: {summary.label}  |  requested model: {summary.model_requested}"
         f"  |  split: {summary.split_filter}  |  {summary.created_at}",
@@ -30,6 +35,7 @@ def render_eval_summary(summary: EvalSummary, saved_path: str) -> str:
         ),
         "  " + render_split_line(summary),
         f"  cost: ${summary.total_cost_usd:.6f} | latency ms (answered): {render_latency(summary)}",
+        *retry_lines,
         f"  saved to: {saved_path}",
     ]
     if summary.failed_outcomes:
