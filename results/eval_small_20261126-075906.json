@@ -1,0 +1,114 @@
+{
+  "label": "small",
+  "model_requested": "small",
+  "created_at": "2026-11-26T07:59:04.447620+00:00",
+  "split_filter": "all",
+  "eval_set_path": "eval/eval_set.jsonl",
+  "outcomes": [
+    {
+      "id": "q001",
+      "difficulty": "easy",
+      "category": "fact",
+      "split": "tune",
+      "question": "What is the capital city of Japan?",
+      "check": "contains_all",
+      "expected": [
+        "tokyo"
+      ],
+      "status": "passed",
+      "truncated": false,
+      "answer": "The capital city of Japan is **Tokyo**.",
+      "answered_by": "small",
+      "input_tokens": 79,
+      "output_tokens": 42,
+      "latency_ms": 905.0,
+      "cost_usd": 0.000018525,
+      "error_message": null,
+      "attempts": 1
+    },
+    {
+      "id": "q002",
+      "difficulty": "easy",
+      "category": "fact",
+      "split": "test",
+      "question": "Which chemical element has the symbol Au?",
+      "check": "contains_all",
+      "expected": [
+        "gold"
+      ],
+      "status": "passed",
+      "truncated": false,
+      "answer": "The chemical element with the symbol **Au** is **gold**.",
+      "answered_by": "small",
+      "input_tokens": 79,
+      "output_tokens": 45,
+      "latency_ms": 1230.9,
+      "cost_usd": 0.000019425,
+      "error_message": null,
+      "attempts": 1
+    },
+    {
+      "id": "q003",
+      "difficulty": "easy",
+      "category": "fact",
+      "split": "tune",
+      "question": "What is the largest planet in our solar system?",
+      "check": "contains_all",
+      "expected": [
+        "jupiter"
+      ],
+      "status": "passed",
+      "truncated": false,
+      "answer": "The largest planet in our solar system is **Jupiter**.",
+      "answered_by": "small",
+      "input_tokens": 81,
+      "output_tokens": 48,
+      "latency_ms": 394.3,
+      "cost_usd": 0.000020475,
+      "error_message": null,
+      "attempts": 1
+    },
+    {
+      "id": "q004",
+      "difficulty": "easy",
+      "category": "fact",
+      "split": "test",
+      "question": "Who wrote the play Romeo and Juliet?",
+      "check": "contains_all",
+      "expected": [
+        "shakespeare"
+      ],
+      "status": "passed",
+      "truncated": false,
+      "answer": "The play *Romeo and Juliet* was written by **William Shakespeare**.",
+      "answered_by": "small",
+      "input_tokens": 79,
+      "output_tokens": 49,
+      "latency_ms": 450.2,
+      "cost_usd": 0.000020625,
+      "error_message": null,
+      "attempts": 1
+    },
+    {
+      "id": "q005",
+      "difficulty": "easy",
+      "category": "fact",
+      "split": "tune",
+      "question": "What is the capital city of Australia?",
+      "check": "contains_all",
+      "expected": [
+        "canberra"
+      ],
+      "status": "passed",
+      "truncated": false,
+      "answer": "The capital city of Australia is **Canberra**.",
+      "answered_by": "small",
+      "input_tokens": 79,
+      "output_tokens": 43,
+      "latency_ms": 406.5,
+      "cost_usd": 0.000018825,
+      "error_message": null,
+      "attempts": 1
+    }
+  ]
+}
