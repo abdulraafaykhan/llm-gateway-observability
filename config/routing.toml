@@ -4,6 +4,7 @@ big_model = "big"
 threshold = 2
 fallback_enabled = true
 fallback_model = "big"
+fallback_on_truncated = false
 
 [rules.long_question]
 medium_words = 40

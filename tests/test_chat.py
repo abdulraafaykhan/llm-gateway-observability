@@ -18,12 +18,12 @@ from app.models.completion import CompletionResult, Message
 from app.models.eval import EvalOutcome, EvalQuestion, EvalRunResult, GatewayReply
 from app.models.fake_profile import FakeProfile
 from app.models.model_spec import ModelSpec
-from app.models.request_record import RequestRecord
-from app.models.routing import RouteDecision
+from app.models.request_record import AttemptRecord, RequestRecord
+from app.models.routing import RouteDecision, RoutingConfig
 from app.providers import fake_provider
 from app.providers.base import LLMProvider, ProviderError
 from app.repositories.base import RequestRepository
-from app.repositories.sqlite_repository import SqliteRequestRepository
+from app.repositories.sqlite_repository import CREATE_TABLE_SQL, SqliteRequestRepository
 from app.routing.base import Router
 from app.routing.factory import build_rule_router
 from app.services.cascade_replay import build_cascade_table, escalate
@@ -84,13 +84,24 @@ class InMemoryRequestRepository(RequestRepository):
 
     def __init__(self) -> None:
         self.records: list[RequestRecord] = []
+        self.attempts: dict[int, list[AttemptRecord]] = {}
 
     async def initialize(self) -> None:
         """Nothing to create for an in-memory list."""
 
-    async def add(self, record: RequestRecord) -> None:
-        """Append the record to the list."""
-        self.records.append(record)
+    async def add(self, record: RequestRecord, attempts: list[AttemptRecord]) -> int:
+        """Append the record with a new id, keep its attempts, and return the id."""
+        request_id = len(self.records) + 1
+        self.records.append(record.model_copy(update={"id": request_id}))
+        if attempts:
+            self.attempts[request_id] = [
+                attempt.model_copy(update={"request_id": request_id}) for attempt in attempts
+            ]
+        return request_id
+
+    async def list_attempts(self, request_ids: list[int]) -> dict[int, list[AttemptRecord]]:
+        """Return the stored attempts of the given requests."""
+        return {rid: self.attempts[rid] for rid in request_ids if rid in self.attempts}
 
     async def list_recent(self, limit: int) -> list[RequestRecord]:
         """Return up to limit records, newest first."""
@@ -108,12 +119,13 @@ def build_client(
     repository: RequestRepository | None = None,
     registry: ModelRegistry | None = None,
     router: Router | None = None,
+    config: RoutingConfig | None = None,
 ) -> httpx.AsyncClient:
     """Build an HTTP client for an app whose ChatService uses the given fakes."""
     app = create_app()
     chat_registry = registry or ModelRegistry(MODELS_CONFIG_PATH)
     chat_repository = repository or InMemoryRequestRepository()
-    routing_config = load_routing_config(str(ROUTING_CONFIG_PATH))
+    routing_config = config or load_routing_config(str(ROUTING_CONFIG_PATH))
     chat_router = router or build_rule_router(routing_config)
 
     def get_fake_chat_service() -> ChatService:
@@ -168,6 +180,7 @@ async def test_chat_returns_answer_with_all_fields() -> None:
         "route_reason",
         "fallback_used",
         "cost_usd",
+        "attempts",
     }
     assert body["answer"] == "Paris"
     assert body["model"] == "big"
@@ -277,8 +290,8 @@ async def test_sqlite_repository_round_trip(tmp_path: Path) -> None:
     """SQLite stores records and lists them newest first."""
     repository = SqliteRequestRepository(tmp_path / "data" / "gateway.db")
     await repository.initialize()
-    await repository.add(make_record(created_at="2026-11-25T10:00:00+00:00", question="first"))
-    await repository.add(make_record(created_at="2026-11-25T10:00:01+00:00", question="second"))
+    await repository.add(make_record(created_at="2026-11-25T10:00:00+00:00", question="first"), [])
+    await repository.add(make_record(created_at="2026-11-25T10:00:01+00:00", question="second"), [])
     records = await repository.list_recent(10)
     assert [record.question for record in records] == ["second", "first"]
     assert all(record.id is not None for record in records)
@@ -354,7 +367,7 @@ async def test_stats_service_splits_by_model_and_handles_empty() -> None:
     """The report splits records by model with sorted keys; no records means requests == 0."""
     repository = InMemoryRequestRepository()
     for model_name in ("small", "big", "small"):
-        await repository.add(make_record(model_name=model_name))
+        await repository.add(make_record(model_name=model_name), [])
     report = await StatsService(repository).build_report(since=None)
     assert report.overall.requests == 3
     assert list(report.by_model) == ["big", "small"]
@@ -376,7 +389,7 @@ async def test_sqlite_list_all_filters_by_since(tmp_path: Path) -> None:
         "2026-11-25T10:10:00+00:00",
     ]
     for index, created_at in enumerate(created_times):
-        await repository.add(make_record(created_at=created_at, question=f"q{index}"))
+        await repository.add(make_record(created_at=created_at, question=f"q{index}"), [])
     all_records = await repository.list_all()
     assert [record.question for record in all_records] == ["q0", "q1", "q2"]
     assert [record.id for record in all_records] == sorted(record.id for record in all_records)
@@ -795,18 +808,30 @@ async def test_fallback_on_failure_sums_attempts() -> None:
     assert failed_row.error_message == "big failed"
 
 
-async def test_fallback_on_cut_off_only_for_auto() -> None:
-    """A cut-off small answer falls back for auto, but not when small was asked for."""
+async def test_fallback_on_cut_off_only_when_enabled() -> None:
+    """By default a cut-off answer is returned as is; fallback_on_truncated makes it fall back."""
     provider = PerModelProvider({"small": answer(truncated=True), "big": answer("From big")})
     repository = InMemoryRequestRepository()
     async with build_client(provider, repository, router=FixedRouter("small")) as client:
-        auto_response = await client.post("/v1/chat", json=AUTO_BODY)
-        small_response = await client.post("/v1/chat", json={**VALID_BODY, "model": "small"})
-    assert (auto_response.json()["model"], auto_response.json()["fallback_used"]) == ("big", True)
-    assert small_response.json()["truncated"] is True
-    auto_row, small_row = repository.records
-    assert (auto_row.status, auto_row.fallback_used) == ("ok", True)
-    assert (small_row.status, small_row.fallback_used) == ("truncated", False)
+        default_response = await client.post("/v1/chat", json=AUTO_BODY)
+    body = default_response.json()
+    assert (body["model"], body["truncated"], body["fallback_used"]) == ("small", True, False)
+    assert len(body["attempts"]) == 1
+    row = repository.records[0]
+    assert (row.status, row.fallback_used, row.model_name) == ("truncated", False, "small")
+
+    enabled = load_routing_config(str(ROUTING_CONFIG_PATH)).model_copy(
+        update={"fallback_on_truncated": True}
+    )
+    enabled_repository = InMemoryRequestRepository()
+    async with build_client(
+        provider, enabled_repository, router=FixedRouter("small"), config=enabled
+    ) as client:
+        enabled_response = await client.post("/v1/chat", json=AUTO_BODY)
+    enabled_body = enabled_response.json()
+    assert (enabled_body["model"], enabled_body["fallback_used"]) == ("big", True)
+    enabled_row = enabled_repository.records[0]
+    assert (enabled_row.status, enabled_row.fallback_used) == ("ok", True)
 
 
 OLD_REQUESTS_TABLE_SQL = """
@@ -846,7 +871,8 @@ async def test_sqlite_upgrades_old_database(tmp_path: Path) -> None:
             columns = {row[1] for row in await cursor.fetchall()}
     assert {"requested_model", "route_reason", "fallback_used"} <= columns
     await repository.add(
-        make_record(question="new", requested_model="auto", route_reason="r", fallback_used=True)
+        make_record(question="new", requested_model="auto", route_reason="r", fallback_used=True),
+        [],
     )
     old_row, new_row = await repository.list_all()
     assert (old_row.question, old_row.requested_model, old_row.route_reason) == ("old", "", "")
@@ -1096,7 +1122,7 @@ async def make_dashboard_db(path: Path, records: list[RequestRecord]) -> None:
     repository = SqliteRequestRepository(path)
     await repository.initialize()
     for record in records:
-        await repository.add(record)
+        await repository.add(record, [])
 
 
 def dashboard_client(data_dir: Path, default_name: str = "gateway.db") -> httpx.AsyncClient:
@@ -1217,8 +1243,13 @@ async def test_dashboard_requests_page_and_static_files(tmp_path: Path) -> None:
     assert items[0]["route_reason"] == "score 0 (threshold 2): no rules matched"
     assert page.status_code == 200 and page.headers["content-type"].startswith("text/html")
     assert script.status_code == 200 and styles.status_code == 200
+    assert_static_files_are_safe()
+
+
+def assert_static_files_are_safe() -> None:
+    """No file under app/static makes external requests or inserts HTML from strings."""
     static_files = [path for path in STATIC_ROOT.rglob("*") if path.is_file()]
-    assert len(static_files) >= 7
+    assert len(static_files) >= 8
     for path in static_files:
         text = path.read_text(encoding="utf-8")
         without_namespace = text.replace("http://www.w3.org/2000/svg", "")
@@ -1425,3 +1456,229 @@ async def test_chat_page_navigation_and_shared_files(tmp_path: Path) -> None:
     assert [asset.status_code for asset in assets] == [200, 200, 200, 200]
     for page in (chat_page, dashboard_page):
         assert '<nav id="site-nav">' in page.text
+
+
+CONCISE_INSTRUCTION = (
+    "Answer in plain text. Be brief unless I ask for detail. Do not use tables or LaTeX."
+)
+
+
+def make_attempt(**changes: Any) -> AttemptRecord:
+    """Build an attempt record for tests; keyword arguments replace the defaults."""
+    fields: dict[str, Any] = {
+        "attempt": 1,
+        "model_name": "big",
+        "model_id": "test-model",
+        "status": "ok",
+        "error_type": None,
+        "error_message": None,
+        "input_tokens": 10,
+        "output_tokens": 20,
+        "latency_ms": 100.0,
+        "cost_usd": 0.001,
+    }
+    fields.update(changes)
+    return AttemptRecord(**fields)
+
+
+async def test_attempts_are_returned_and_stored_per_call() -> None:
+    """Each provider call becomes one attempt in the response and in storage."""
+    registry = ModelRegistry(MODELS_CONFIG_PATH)
+    small_error = ProviderError("small failed", input_tokens=10, output_tokens=100)
+    repository = InMemoryRequestRepository()
+    provider = PerModelProvider({"small": small_error, "big": answer("From big")})
+    async with build_client(provider, repository, registry, FixedRouter("small")) as client:
+        auto_body = (await client.post("/v1/chat", json=AUTO_BODY)).json()
+        big_body = (await client.post("/v1/chat", json={**VALID_BODY, "model": "big"})).json()
+    first, second = auto_body["attempts"]
+    assert (first["attempt"], first["model"], first["status"]) == (1, "small", "error")
+    assert (second["attempt"], second["model"], second["status"]) == (2, "big", "ok")
+    assert first["error_message"] == "small failed"
+    assert (first["input_tokens"], first["output_tokens"]) == (10, 100)
+    assert (second["input_tokens"], second["output_tokens"]) == (12, 3)
+    assert first["cost_usd"] == registry.get("small").cost_usd(10, 100)
+    assert second["cost_usd"] == registry.get("big").cost_usd(12, 3)
+    assert all(attempt["latency_ms"] >= 0 for attempt in auto_body["attempts"])
+    stored = repository.attempts[1]
+    assert [attempt.status for attempt in stored] == ["error", "ok"]
+    row = repository.records[0]
+    assert row.input_tokens == sum(attempt.input_tokens for attempt in stored)
+    assert row.output_tokens == sum(attempt.output_tokens for attempt in stored)
+    assert row.cost_usd == sum(attempt.cost_usd for attempt in stored)
+    assert len(big_body["attempts"]) == 1
+    assert len(repository.attempts[2]) == 1
+
+    both_fail = PerModelProvider({"small": small_error, "big": ProviderError("big failed")})
+    failed_repository = InMemoryRequestRepository()
+    async with build_client(both_fail, failed_repository, registry, FixedRouter("small")) as client:
+        failed = await client.post("/v1/chat", json=AUTO_BODY)
+    assert failed.status_code == 502
+    assert [attempt.status for attempt in failed_repository.attempts[1]] == ["error", "error"]
+
+
+async def test_sqlite_stores_attempts_with_their_request(tmp_path: Path) -> None:
+    """add() stores a request and its attempts together; old databases gain the table."""
+    repository = SqliteRequestRepository(tmp_path / "gateway.db")
+    await repository.initialize()
+    fallback_attempts = [
+        make_attempt(
+            attempt=1,
+            model_name="small",
+            status="error",
+            error_type="provider_error",
+            error_message="boom",
+        ),
+        make_attempt(attempt=2),
+    ]
+    first_id = await repository.add(make_record(question="fallback"), fallback_attempts)
+    second_id = await repository.add(make_record(question="no attempts"), [])
+    assert first_id > 0 and second_id != first_id
+    stored = await repository.list_attempts([first_id, second_id])
+    assert list(stored) == [first_id]
+    assert [attempt.attempt for attempt in stored[first_id]] == [1, 2]
+    assert [attempt.model_name for attempt in stored[first_id]] == ["small", "big"]
+    assert {attempt.request_id for attempt in stored[first_id]} == {first_id}
+    assert await repository.list_attempts([]) == {}
+    assert [record.id for record in await repository.list_all()] == [first_id, second_id]
+
+    old_path = tmp_path / "part6.db"
+    async with aiosqlite.connect(old_path) as connection:
+        await connection.execute(CREATE_TABLE_SQL)
+        await connection.execute(
+            "INSERT INTO requests (created_at, model_name, model_id, question, answer, status, "
+            "input_tokens, output_tokens, latency_ms, cost_usd) "
+            "VALUES ('2026-11-25T10:00:00+00:00', 'big', 'm', 'old', 'a', 'ok', 1, 2, 3.0, 0.0)"
+        )
+        await connection.commit()
+    old_repository = SqliteRequestRepository(old_path)
+    assert await old_repository.list_attempts([1]) == {}
+    await old_repository.initialize()
+    _, tables = await table_snapshot(old_path)
+    assert "request_attempts" in tables
+    (old_row,) = await old_repository.list_all()
+    assert old_row.question == "old"
+    assert old_row.id is not None
+    assert await old_repository.list_attempts([old_row.id]) == {}
+
+
+async def test_dashboard_attempts_and_wasted_spend(tmp_path: Path) -> None:
+    """Dashboard rows carry their attempts; insights total attempts and wasted spend."""
+    repository = SqliteRequestRepository(tmp_path / "gateway.db")
+    await repository.initialize()
+    await repository.add(make_record(created_at=minutes_ago(6), question="old"), [])
+    await repository.add(
+        make_record(created_at=minutes_ago(5), question="single"),
+        [make_attempt(input_tokens=10, output_tokens=20, cost_usd=0.001)],
+    )
+    await repository.add(
+        make_record(created_at=minutes_ago(4), question="fallback", fallback_used=True),
+        [
+            make_attempt(
+                model_name="small",
+                status="error",
+                error_message="small failed",
+                input_tokens=10,
+                output_tokens=100,
+                cost_usd=0.0003,
+            ),
+            make_attempt(attempt=2, input_tokens=12, output_tokens=30, cost_usd=0.002),
+        ],
+    )
+    await repository.add(
+        make_record(
+            created_at=minutes_ago(3),
+            question="both failed",
+            status="error",
+            answer=None,
+            error_message="big failed",
+        ),
+        [
+            make_attempt(
+                model_name="small",
+                status="error",
+                error_message="small failed",
+                input_tokens=5,
+                output_tokens=50,
+                cost_usd=0.0002,
+            ),
+            make_attempt(
+                attempt=2,
+                status="error",
+                error_message="big failed",
+                input_tokens=5,
+                output_tokens=0,
+                cost_usd=0.00005,
+            ),
+        ],
+    )
+    await repository.add(
+        make_record(
+            created_at=minutes_ago(2), question="cut off", model_name="small", status="truncated"
+        ),
+        [
+            make_attempt(
+                model_name="small",
+                status="truncated",
+                input_tokens=8,
+                output_tokens=900,
+                cost_usd=0.0003,
+            )
+        ],
+    )
+    async with dashboard_client(tmp_path) as client:
+        items = (await client.get("/api/dashboard/requests")).json()["items"]
+        insights = (await client.get("/api/dashboard/insights")).json()
+
+    by_question = {item["question"]: item for item in items}
+    assert by_question["old"]["attempts"] == []
+    fallback = by_question["fallback"]["attempts"]
+    assert [(attempt["model"], attempt["status"]) for attempt in fallback] == [
+        ("small", "error"),
+        ("big", "ok"),
+    ]
+    assert len(insights["failures"]["recent"][0]["attempts"]) == 2
+
+    stats = insights["attempts_by_model"]
+    big, small = stats["big"], stats["small"]
+    assert (big["attempts"], big["answered"], big["truncated"], big["errors"]) == (3, 2, 0, 1)
+    assert (big["input_tokens"], big["output_tokens"]) == (27, 50)
+    assert big["cost_usd"] == pytest.approx(0.00305)
+    assert (small["attempts"], small["answered"], small["truncated"], small["errors"]) == (
+        3,
+        1,
+        1,
+        2,
+    )
+    assert (small["input_tokens"], small["output_tokens"]) == (23, 1050)
+    assert small["cost_usd"] == pytest.approx(0.0008)
+
+    failures = insights["failures"]
+    assert failures["wasted_cost_usd"] == pytest.approx(0.0003 + 0.0002 + 0.00005)
+    assert failures["wasted_tokens"] == 110 + 55 + 5
+
+
+async def test_fallback_setting_and_chat_assets(tmp_path: Path) -> None:
+    """fallback_on_truncated is optional; markdown.js is served and loaded before chat.js."""
+    text = ROUTING_CONFIG_PATH.read_text(encoding="utf-8")
+    assert "fallback_on_truncated = false" in text
+    assert load_routing_config(str(ROUTING_CONFIG_PATH)).fallback_on_truncated is False
+    enabled_path = tmp_path / "enabled.toml"
+    enabled_path.write_text(
+        text.replace("fallback_on_truncated = false", "fallback_on_truncated = true"),
+        encoding="utf-8",
+    )
+    assert load_routing_config(str(enabled_path)).fallback_on_truncated is True
+    absent_path = tmp_path / "absent.toml"
+    absent_path.write_text(text.replace("fallback_on_truncated = false\n", ""), encoding="utf-8")
+    assert "fallback_on_truncated" not in absent_path.read_text(encoding="utf-8")
+    assert load_routing_config(str(absent_path)).fallback_on_truncated is False
+
+    async with dashboard_client(tmp_path) as client:
+        script = await client.get("/chat/assets/markdown.js")
+        page = await client.get("/chat")
+    assert script.status_code == 200
+    markdown_at = page.text.index('src="/chat/assets/markdown.js"')
+    assert markdown_at < page.text.index('src="/chat/assets/chat.js"')
+    chat_script = (STATIC_ROOT / "chat" / "chat.js").read_text(encoding="utf-8")
+    assert chat_script.count(CONCISE_INSTRUCTION) == 1
+    assert_static_files_are_safe()

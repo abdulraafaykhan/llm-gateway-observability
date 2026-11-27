@@ -25,6 +25,10 @@ CONFIG_KEYS: dict[str, tuple[str, str]] = {
     "multiple_questions_points": ("rules.multiple_questions", "points"),
     "min_question_marks": ("rules.multiple_questions", "min_question_marks"),
 }
+# Optional keys: RoutingConfig field -> (TOML table, key); a missing key keeps the model default.
+OPTIONAL_KEYS: dict[str, tuple[str, str]] = {
+    "fallback_on_truncated": ("router", "fallback_on_truncated"),
+}
 MODEL_SETTINGS: tuple[str, ...] = ("small_model", "big_model", "fallback_model")
 
 
@@ -43,6 +47,10 @@ def load_routing_config(path: str) -> RoutingConfig:
         field: _read_key(data, table, key, config_path)
         for field, (table, key) in CONFIG_KEYS.items()
     }
+    for field, (table, key) in OPTIONAL_KEYS.items():
+        section = data.get(table)
+        if isinstance(section, dict) and key in section:
+            values[field] = section[key]
     try:
         return RoutingConfig(**values)
     except ValidationError as error:

@@ -24,3 +24,20 @@ class RequestRecord(BaseModel):
     requested_model: str = ""
     route_reason: str = ""
     fallback_used: bool = False
+
+
+class AttemptRecord(BaseModel):
+    """One provider call within a request; a request has one attempt, or two with a fallback."""
+
+    id: int | None = None
+    request_id: int | None = None
+    attempt: int
+    model_name: str
+    model_id: str
+    status: Literal["ok", "truncated", "error"]
+    error_type: str | None
+    error_message: str | None
+    input_tokens: int
+    output_tokens: int
+    latency_ms: float
+    cost_usd: float

@@ -180,6 +180,10 @@ tr.clickable:hover { background: var(--bg); }
 tr.clickable[aria-expanded="true"] { background: var(--bg); font-weight: 600; }
 
 td.wrap { white-space: normal; min-width: 14rem; overflow-wrap: anywhere; }
+.attempts { width: auto; margin-top: 0.25rem; }
+.attempts th, .detail .attempts td { border: 1px solid var(--border); padding: 0.25rem 0.5rem; white-space: nowrap; }
+.detail .attempts .attempt-error td { color: var(--error); white-space: normal; }
+.attempts .attempt-total th, .attempts .attempt-total td { font-weight: 700; }
 .detail td { white-space: normal; background: var(--bg); }
 .detail dt { font-weight: 700; margin-top: 0.5rem; }
 .detail dd { margin: 0.2rem 0 0; }

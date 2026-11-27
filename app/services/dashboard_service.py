@@ -13,12 +13,14 @@ from app.models.dashboard import (
     FailureSummary,
     InsightsResult,
     LatencyHistogram,
+    ModelAttemptStats,
+    RequestWithAttempts,
     RoutingSummary,
     SourceInfo,
     TimeBucket,
     TimeseriesResult,
 )
-from app.models.request_record import RequestRecord
+from app.models.request_record import AttemptRecord, RequestRecord
 from app.models.stats import StatsReport
 from app.repositories.base import RequestRepository
 from app.services.failure_types import FAILURE_TYPES, classify_failure
@@ -125,18 +127,21 @@ class DashboardService:
         """Return failures, routing, latency spread, and slowest requests for the range."""
         repository = self._repository(source)
         records = await repository.list_all(since_iso(utc_now(), minutes))
-        return build_insights(records)
+        attempts = await repository.list_attempts(record_ids(records))
+        return build_insights(records, attempts)
 
     async def recent(
         self, source: str | None, limit: int, minutes: int | None
-    ) -> list[RequestRecord]:
-        """Return up to limit records, newest first."""
+    ) -> list[RequestWithAttempts]:
+        """Return up to limit records with their attempts, newest first."""
         repository = self._repository(source)
         if minutes is None:
-            return await repository.list_recent(limit)
-        records = await repository.list_all(since_iso(utc_now(), minutes))
-        newest = sorted(records, key=lambda record: (record.created_at, record.id or 0))
-        return list(reversed(newest))[:limit]
+            records = await repository.list_recent(limit)
+        else:
+            window = await repository.list_all(since_iso(utc_now(), minutes))
+            records = newest_first(window)[:limit]
+        attempts = await repository.list_attempts(record_ids(records))
+        return attach_attempts(records, attempts)
 
     def _repository(self, source: str | None) -> RequestRepository:
         """Build a read-only repository for a validated source name."""
@@ -219,14 +224,72 @@ def make_bucket(start_seconds: int, records: list[RequestRecord]) -> TimeBucket:
     )
 
 
-def build_insights(records: list[RequestRecord]) -> InsightsResult:
-    """Compute all four insight panels from one list of rows."""
+AttemptsById = dict[int, list[AttemptRecord]]
+
+
+def record_ids(records: list[RequestRecord]) -> list[int]:
+    """Return the ids of stored records."""
+    return [record.id for record in records if record.id is not None]
+
+
+def attempts_of(record: RequestRecord, attempts_by_id: AttemptsById) -> list[AttemptRecord]:
+    """Return a record's attempts, or an empty list for rows recorded before attempts."""
+    return attempts_by_id.get(record.id, []) if record.id is not None else []
+
+
+def attach_attempts(
+    records: list[RequestRecord], attempts_by_id: AttemptsById
+) -> list[RequestWithAttempts]:
+    """Pair each record with its attempts."""
+    return [
+        RequestWithAttempts(record=record, attempts=attempts_of(record, attempts_by_id))
+        for record in records
+    ]
+
+
+def build_insights(records: list[RequestRecord], attempts_by_id: AttemptsById) -> InsightsResult:
+    """Compute every insight panel from one list of rows and their attempts."""
     return InsightsResult(
-        failures=summarize_failures(records),
+        failures=summarize_failures(records, attempts_by_id),
         routing=summarize_routing(records),
         latency_histogram=build_latency_histogram(records),
-        slowest=slowest_answered(records),
+        slowest=attach_attempts(slowest_answered(records), attempts_by_id),
+        attempts_by_model=summarize_attempts_by_model(attempts_by_id),
     )
+
+
+def wasted_attempts(attempts_by_id: AttemptsById) -> list[AttemptRecord]:
+    """Every attempt but the last is wasted; the last one too when it failed."""
+    wasted: list[AttemptRecord] = []
+    for attempts in attempts_by_id.values():
+        if not attempts:
+            continue
+        wasted.extend(attempts[:-1])
+        if attempts[-1].status == "error":
+            wasted.append(attempts[-1])
+    return wasted
+
+
+def model_attempt_stats(attempts: list[AttemptRecord]) -> ModelAttemptStats:
+    """Total up a list of attempts made on one model."""
+    return ModelAttemptStats(
+        attempts=len(attempts),
+        answered=sum(1 for attempt in attempts if attempt.status in ANSWERED_STATUSES),
+        truncated=sum(1 for attempt in attempts if attempt.status == "truncated"),
+        errors=sum(1 for attempt in attempts if attempt.status == "error"),
+        input_tokens=sum(attempt.input_tokens for attempt in attempts),
+        output_tokens=sum(attempt.output_tokens for attempt in attempts),
+        cost_usd=sum(attempt.cost_usd for attempt in attempts),
+    )
+
+
+def summarize_attempts_by_model(attempts_by_id: AttemptsById) -> dict[str, ModelAttemptStats]:
+    """Group every attempt by its model and total each group, sorted by model name."""
+    by_model: dict[str, list[AttemptRecord]] = {}
+    for attempts in attempts_by_id.values():
+        for attempt in attempts:
+            by_model.setdefault(attempt.model_name, []).append(attempt)
+    return {name: model_attempt_stats(by_model[name]) for name in sorted(by_model)}
 
 
 def newest_first(records: list[RequestRecord]) -> list[RequestRecord]:
@@ -234,16 +297,23 @@ def newest_first(records: list[RequestRecord]) -> list[RequestRecord]:
     return sorted(records, key=lambda record: (record.created_at, record.id or 0), reverse=True)
 
 
-def summarize_failures(records: list[RequestRecord]) -> FailureSummary:
-    """Count failed rows by type, sum what they cost, and list the most recent ones."""
+def summarize_failures(
+    records: list[RequestRecord], attempts_by_id: AttemptsById
+) -> FailureSummary:
+    """Count failed rows by type, sum what they and wasted attempts cost, list recent ones."""
     failed = [record for record in records if record.status == "error"]
     by_type = dict.fromkeys(FAILURE_TYPES, 0)
     for record in failed:
         by_type[classify_failure(record.error_message)] += 1
     recent = [
-        FailedRequest(record=record, failure_type=classify_failure(record.error_message))
+        FailedRequest(
+            record=record,
+            attempts=attempts_of(record, attempts_by_id),
+            failure_type=classify_failure(record.error_message),
+        )
         for record in newest_first(failed)[:INSIGHT_LIST_LIMIT]
     ]
+    wasted = wasted_attempts(attempts_by_id)
     return FailureSummary(
         by_type=by_type,
         errors=len(failed),
@@ -251,6 +321,8 @@ def summarize_failures(records: list[RequestRecord]) -> FailureSummary:
         failed_cost_usd=sum(record.cost_usd for record in failed),
         failed_input_tokens=sum(record.input_tokens for record in failed),
         failed_output_tokens=sum(record.output_tokens for record in failed),
+        wasted_cost_usd=sum(attempt.cost_usd for attempt in wasted),
+        wasted_tokens=sum(attempt.input_tokens + attempt.output_tokens for attempt in wasted),
         recent=recent,
     )
 

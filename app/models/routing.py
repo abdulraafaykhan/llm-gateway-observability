@@ -29,6 +29,7 @@ class RoutingConfig(BaseModel):
     threshold: int
     fallback_enabled: bool
     fallback_model: str
+    fallback_on_truncated: bool = False
     medium_words: int
     long_words: int
     keywords_points: int

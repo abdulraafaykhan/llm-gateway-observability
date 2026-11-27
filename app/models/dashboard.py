@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel
 
-from app.models.request_record import RequestRecord
+from app.models.request_record import AttemptRecord, RequestRecord
 
 
 class SourceInfo(BaseModel):
@@ -36,10 +36,30 @@ class TimeseriesResult(BaseModel):
 
 
 class FailedRequest(BaseModel):
-    """One failed request with its failure type."""
+    """One failed request with its attempts and failure type."""
 
     record: RequestRecord
+    attempts: list[AttemptRecord]
     failure_type: str
+
+
+class RequestWithAttempts(BaseModel):
+    """One stored request with its attempts (empty for rows recorded before attempts)."""
+
+    record: RequestRecord
+    attempts: list[AttemptRecord]
+
+
+class ModelAttemptStats(BaseModel):
+    """Totals over every attempt made on one model, including failed and fallback attempts."""
+
+    attempts: int
+    answered: int
+    truncated: int
+    errors: int
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
 
 
 class FailureSummary(BaseModel):
@@ -51,6 +71,8 @@ class FailureSummary(BaseModel):
     failed_cost_usd: float
     failed_input_tokens: int
     failed_output_tokens: int
+    wasted_cost_usd: float
+    wasted_tokens: int
     recent: list[FailedRequest]
 
 
@@ -77,4 +99,5 @@ class InsightsResult(BaseModel):
     failures: FailureSummary
     routing: RoutingSummary
     latency_histogram: LatencyHistogram
-    slowest: list[RequestRecord]
+    slowest: list[RequestWithAttempts]
+    attempts_by_model: dict[str, ModelAttemptStats]

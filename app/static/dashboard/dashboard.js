@@ -12,12 +12,15 @@ const CARD_LABELS = [
   "Cost per 1,000 answered", "Latency p50", "Latency p95", "Latency p99",
 ];
 const REFRESH_MS = 5000;
+const STATUS_WORDS = { ok: "answered", truncated: "cut off", error: "failed" };
+const ATTEMPT_NOTE = "Only requests recorded with attempt details are counted.";
 const RECENT_LIMIT = 50;
 const CHART = { width: 640, height: 260, left: 64, right: 16, top: 28, bottom: 48 };
 
 const state = {
   source: null, range: "all", live: false, timer: null,
-  busy: false, pending: false, lastSummary: null, openIds: new Set(), openSlowIds: new Set(),
+  busy: false, pending: false, lastSummary: null,
+  openIds: new Set(), openSlowIds: new Set(), openFailureIds: new Set(),
 };
 
 const byId = (id) => document.getElementById(id);
@@ -344,6 +347,34 @@ function renderModelTable(byModel) {
   byId("table-models").tBodies[0].replaceChildren(...rows);
 }
 
+// The same attempt columns as the chat inspector, plus a total row.
+function attemptsTable(item) {
+  const attempts = item.attempts || [];
+  if (!attempts.length) return el("p", { class: "muted" }, ["No attempt details (recorded before attempts were tracked)."]);
+  const labels = ["#", "Model", "Status", "Tokens in", "Tokens out", "Time", "Cost"];
+  const rows = [];
+  for (const attempt of attempts) {
+    rows.push(el("tr", {}, [
+      cell(String(attempt.attempt)), cell(attempt.model), cell(STATUS_WORDS[attempt.status] || attempt.status),
+      cell(formatCount(attempt.input_tokens)), cell(formatCount(attempt.output_tokens)),
+      cell(formatMs(attempt.latency_ms)), cell(formatMoney(attempt.cost_usd)),
+    ]));
+    if (attempt.error_message) {
+      rows.push(el("tr", { class: "attempt-error" }, [el("td", { colspan: "7" }, [`Error: ${attempt.error_message}`])]));
+    }
+  }
+  const sum = (key) => attempts.reduce((total, attempt) => total + (attempt[key] || 0), 0);
+  rows.push(el("tr", { class: "attempt-total" }, [
+    el("th", { scope: "row", colspan: "3" }, ["Total"]),
+    cell(formatCount(sum("input_tokens"))), cell(formatCount(sum("output_tokens"))),
+    cell(formatMs(item.latency_ms)), cell(formatMoney(sum("cost_usd"))),
+  ]));
+  return el("div", { class: "table-wrap" }, [el("table", { class: "attempts" }, [
+    el("thead", {}, [el("tr", {}, labels.map((label) => el("th", { scope: "col" }, [label])))]),
+    el("tbody", {}, rows),
+  ])]);
+}
+
 function detailBlock(item) {
   const failed = item.status === "error";
   return el("dl", {}, [
@@ -351,6 +382,7 @@ function detailBlock(item) {
     el("dt", {}, [failed ? "Error" : "Answer"]),
     el("dd", {}, [el("pre", {}, [(failed ? item.error_message : item.answer) || "-"])]),
     el("dt", {}, ["Route reason"]), el("dd", {}, [el("pre", {}, [item.route_reason || "-"])]),
+    el("dt", {}, ["Attempts"]), el("dd", {}, [attemptsTable(item)]),
   ]);
 }
 
@@ -413,20 +445,54 @@ function renderFailures(failures) {
     ["Cost of failed requests", formatMoney(failures.failed_cost_usd)],
     ["Tokens used by failed requests", formatCount(tokens),
       `${failures.failed_input_tokens} in + ${failures.failed_output_tokens} out`],
+    ["Wasted spend", formatMoney(failures.wasted_cost_usd), ATTEMPT_NOTE],
+    ["Wasted tokens", formatCount(failures.wasted_tokens), ATTEMPT_NOTE],
   ].map(cardNode));
   if (!showPanel("failures-empty", "failures-body", failures.errors + failures.truncated > 0)) return;
   const types = Object.keys(failures.by_type);
   const colors = Object.fromEntries(types.map((name) => [name, "var(--error)"]));
   const items = types.map((name) => ({ label: name, value: failures.by_type[name] }));
   barChart(byId("chart-failures"), "Failures by type", items, colors, (value) => String(Math.round(value)));
-  byId("table-failures").tBodies[0].replaceChildren(...failures.recent.map((item) => {
+  renderExpandableRows("table-failures", failures.recent, (item) => {
     const message = item.error_message || "";
-    return el("tr", {}, [
+    return [
       cell(formatLocalDateTime(item.created_at)), cell(item.model_name), cell(item.failure_type),
       el("td", { title: message, class: "wrap" }, [shorten(message, 100)]),
       cell(formatCount(item.input_tokens)), cell(formatCount(item.output_tokens)),
-    ]);
-  }));
+    ];
+  }, state.openFailureIds);
+}
+
+// The "Spend by model (all attempts)" panel is added after the Routing panel once.
+function spendPanel() {
+  let panel = byId("spend-panel");
+  if (panel) return panel;
+  const labels = ["Model", "Attempts", "Answered", "Cut off", "Failed", "Tokens in", "Tokens out", "Cost", "Share of cost"];
+  panel = el("section", { class: "panel", id: "spend-panel" }, [
+    el("h3", {}, ["Spend by model (all attempts)"]),
+    el("p", { class: "empty", id: "spend-empty", hidden: "" }, ["No attempt data in this range."]),
+    el("div", { class: "table-wrap", id: "spend-body" }, [
+      el("table", { id: "table-spend" }, [
+        el("thead", {}, [el("tr", {}, labels.map((label) => el("th", { scope: "col" }, [label])))]),
+        el("tbody"),
+      ]),
+    ]),
+  ]);
+  byId("table-routing").closest("section").after(panel);
+  return panel;
+}
+
+function renderSpendByModel(byModel) {
+  spendPanel();
+  const entries = Object.entries(byModel);
+  if (!showPanel("spend-empty", "spend-body", entries.length > 0)) return;
+  const total = entries.reduce((sum, [, stats]) => sum + stats.cost_usd, 0);
+  byId("table-spend").tBodies[0].replaceChildren(...entries.map(([model, stats]) => el("tr", {}, [
+    el("th", { scope: "row" }, [model]),
+    cell(formatCount(stats.attempts)), cell(formatCount(stats.answered)), cell(formatCount(stats.truncated)),
+    cell(formatCount(stats.errors)), cell(formatCount(stats.input_tokens)), cell(formatCount(stats.output_tokens)),
+    cell(formatMoney(stats.cost_usd)), cell(total > 0 ? formatPercent((stats.cost_usd / total) * 100) : "-"),
+  ])));
 }
 
 function routingRow(label, count, note) {
@@ -507,6 +573,7 @@ function renderSlowest(items) {
 function renderInsights(insights, colors) {
   renderFailures(insights.failures);
   renderRouting(insights.routing);
+  renderSpendByModel(insights.attempts_by_model || {});
   renderLatencySpread(insights.latency_histogram, colors);
   renderSlowest(insights.slowest);
 }
@@ -598,6 +665,7 @@ function wireControls() {
     state.source = event.target.value;
     state.openIds.clear();
     state.openSlowIds.clear();
+    state.openFailureIds.clear();
     saveToUrl();
     refresh(true);
   });

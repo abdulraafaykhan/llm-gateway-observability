@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel
 
+from app.models.request_record import AttemptRecord
+
 
 class ChatOutcome(BaseModel):
     """The final answer plus totals across all attempts, and how the model was chosen."""
@@ -16,3 +18,4 @@ class ChatOutcome(BaseModel):
     requested_model: str
     route_reason: str
     fallback_used: bool
+    attempts: list[AttemptRecord]

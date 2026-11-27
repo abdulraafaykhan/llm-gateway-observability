@@ -6,7 +6,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from app.models.request_record import RequestRecord
+from app.models.request_record import AttemptRecord, RequestRecord
 from app.repositories.base import RequestRepository
 
 CREATE_TABLE_SQL = """
@@ -51,6 +51,44 @@ INSERT INTO requests (
 )
 """
 
+CREATE_ATTEMPTS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS request_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id INTEGER NOT NULL,
+    attempt INTEGER NOT NULL,
+    model_name TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error_type TEXT,
+    error_message TEXT,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    latency_ms REAL NOT NULL,
+    cost_usd REAL NOT NULL
+)
+"""
+
+CREATE_ATTEMPTS_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_request_attempts_request_id ON request_attempts (request_id)"
+)
+
+INSERT_ATTEMPT_SQL = """
+INSERT INTO request_attempts (
+    request_id, attempt, model_name, model_id, status, error_type, error_message,
+    input_tokens, output_tokens, latency_ms, cost_usd
+) VALUES (
+    :request_id, :attempt, :model_name, :model_id, :status, :error_type, :error_message,
+    :input_tokens, :output_tokens, :latency_ms, :cost_usd
+)
+"""
+
+ATTEMPTS_TABLE_EXISTS_SQL = (
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'request_attempts'"
+)
+
+# Request ids are passed as "?" placeholders, a chunk at a time to stay under SQLite's limit.
+ATTEMPT_ID_CHUNK: int = 500
+
 SELECT_RECENT_SQL = "SELECT * FROM requests ORDER BY created_at DESC, id DESC LIMIT ?"
 
 SELECT_ALL_SQL = "SELECT * FROM requests ORDER BY id ASC"
@@ -72,15 +110,56 @@ class SqliteRequestRepository(RequestRepository):
             await connection.execute(CREATE_TABLE_SQL)
             await _add_missing_columns(connection)
             await connection.execute(CREATE_INDEX_SQL)
+            await connection.execute(CREATE_ATTEMPTS_TABLE_SQL)
+            await connection.execute(CREATE_ATTEMPTS_INDEX_SQL)
             await connection.commit()
 
-    async def add(self, record: RequestRecord) -> None:
-        """Insert one record."""
+    async def add(self, record: RequestRecord, attempts: list[AttemptRecord]) -> int:
+        """Insert the request and its attempts in one transaction; return the request id."""
         parameters = record.model_dump(exclude={"id"})
         parameters["fallback_used"] = int(record.fallback_used)
         async with self._connect() as connection:
-            await connection.execute(INSERT_SQL, parameters)
-            await connection.commit()
+            try:
+                cursor = await connection.execute(INSERT_SQL, parameters)
+                request_id = cursor.lastrowid
+                if request_id is None:
+                    raise RuntimeError("SQLite did not return an id for the new request")
+                await connection.executemany(
+                    INSERT_ATTEMPT_SQL,
+                    [
+                        attempt.model_dump(exclude={"id"}) | {"request_id": request_id}
+                        for attempt in attempts
+                    ],
+                )
+                await connection.commit()
+            except Exception:
+                await connection.rollback()
+                raise
+        return request_id
+
+    async def list_attempts(self, request_ids: list[int]) -> dict[int, list[AttemptRecord]]:
+        """Return each request's attempts, ordered by attempt, using placeholder queries."""
+        if not request_ids:
+            return {}
+        grouped: dict[int, list[AttemptRecord]] = {}
+        async with self._connect() as connection:
+            async with connection.execute(ATTEMPTS_TABLE_EXISTS_SQL) as cursor:
+                if await cursor.fetchone() is None:
+                    return {}
+            connection.row_factory = aiosqlite.Row
+            unique_ids = sorted(set(request_ids))
+            for start in range(0, len(unique_ids), ATTEMPT_ID_CHUNK):
+                chunk = unique_ids[start : start + ATTEMPT_ID_CHUNK]
+                placeholders = ", ".join("?" for _ in chunk)
+                sql = (
+                    f"SELECT * FROM request_attempts WHERE request_id IN ({placeholders}) "
+                    "ORDER BY request_id, attempt"
+                )
+                async with connection.execute(sql, chunk) as cursor:
+                    for row in await cursor.fetchall():
+                        attempt = AttemptRecord(**dict(row))
+                        grouped.setdefault(row["request_id"], []).append(attempt)
+        return grouped
 
     async def list_recent(self, limit: int) -> list[RequestRecord]:
         """Return up to limit records, newest first."""

@@ -11,35 +11,52 @@
   <nav id="site-nav"></nav>
 
   <main class="chat-layout">
-    <section class="panel" aria-labelledby="chat-title">
-      <h1 id="chat-title">Chat</h1>
+    <section class="panel chat-panel" aria-labelledby="chat-title">
+      <div class="chat-top">
+        <h1 id="chat-title">Chat</h1>
 
-      <div class="chat-controls">
-        <label class="control">
-          <span>Model</span>
-          <select id="model"></select>
-        </label>
-        <label class="control">
-          <input type="checkbox" id="compare">
-          <span>Compare two models</span>
-        </label>
-        <span id="compare-pickers" class="chat-controls" hidden>
+        <div class="chat-controls">
           <label class="control">
-            <span>Left model</span>
-            <select id="left-model"></select>
+            <span>Model</span>
+            <select id="model"></select>
           </label>
           <label class="control">
-            <span>Right model</span>
-            <select id="right-model"></select>
+            <input type="checkbox" id="compare">
+            <span>Compare two models</span>
           </label>
-        </span>
-        <button type="button" id="new-chat">New chat</button>
+          <span id="compare-pickers" class="chat-controls" hidden>
+            <label class="control">
+              <span>Left model</span>
+              <select id="left-model"></select>
+            </label>
+            <label class="control">
+              <span>Right model</span>
+              <select id="right-model"></select>
+            </label>
+          </span>
+          <label class="control">
+            <input type="checkbox" id="concise" checked>
+            <span>Concise answers</span>
+          </label>
+          <button type="button" id="new-chat">New chat</button>
+        </div>
+
+        <details class="note">
+          <summary>What does this send?</summary>
+          <p>With "Concise answers" ticked, each request starts with this system message (not shown in the chat):</p>
+          <p id="concise-text" class="instruction"></p>
+        </details>
+
+        <p id="fake-banner" class="banner" hidden>Fake mode: answers are simulated placeholders, not real model output.</p>
+        <p class="note">Requests made here are recorded in the database like any other request.</p>
+        <p id="compare-note" class="note" hidden>Compare mode sends each question on its own, without earlier messages.</p>
+        <p id="page-error" class="error" role="alert" hidden></p>
+
+        <label class="control">
+          <input type="checkbox" id="raw">
+          <span>Show raw text</span>
+        </label>
       </div>
-
-      <p id="fake-banner" class="banner" hidden>Fake mode: answers are simulated placeholders, not real model output.</p>
-      <p class="note">Requests made here are recorded in the database like any other request.</p>
-      <p id="compare-note" class="note" hidden>Compare mode sends each question on its own, without earlier messages.</p>
-      <p id="page-error" class="error" role="alert" hidden></p>
 
       <div id="conversation" class="conversation" aria-live="polite" aria-label="Conversation"></div>
 
@@ -60,6 +77,7 @@
   </main>
 
   <script src="/shared/nav.js" defer></script>
+  <script src="/chat/assets/markdown.js" defer></script>
   <script src="/chat/assets/chat.js" defer></script>
 </body>
 </html>

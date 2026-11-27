@@ -7,7 +7,7 @@ A small web server that sits between an app and its AI models and records the co
 - **Pass-through chat API.** `POST /v1/chat` sends a conversation to a Groq model and returns the answer with token counts, latency and cost.
 - **A record for every request.** Each call, including failures and cut-off answers, is saved as one row in SQLite. `GET /v1/requests` lists recent rows.
 - **Stats.** A command reports request counts, error rate, tokens, cost, and latency at p50, p95 and p99 (p95 is the time 95% of answered requests finished under), overall and per model.
-- **Routing with fallback.** Sending `"model": "auto"` lets simple scoring rules pick the small or the big model. If the chosen model fails or its answer is cut off, the gateway retries once on the big model.
+- **Routing with fallback.** Sending `"model": "auto"` lets simple scoring rules pick the small or the big model. If the chosen model fails (an error or an empty answer), the gateway retries once on the big model. A cut-off answer with text is returned as it is, flagged as cut off, unless `fallback_on_truncated = true` in `config\routing.toml`.
 - **Fake mode and load tests.** A simulated provider with realistic delays, failures and a limit on parallel requests, plus a script that sends traffic at a planned rate to see how the gateway behaves under a spike.
 - **Read-only dashboard and chat page.** `/dashboard` charts the request log of any database file in the data folder, including failure and routing insights; `/chat` sends messages through the gateway and shows how each was handled.
 - **Evals and offline replay.** Two labelled question sets, a grading command, a comparison of two runs, and replay commands that estimate what a router or a cascade would have scored and cost using saved answers, with no new model calls.
@@ -27,9 +27,10 @@ ChatService --- model "auto"? ---> rule router (config/routing.toml) picks small
   v
 provider: Groq (real mode) or simulated (fake mode)
   |
-  |-- "auto" only: first model failed or was cut off --> one retry on big
+  |-- "auto" only: first model failed --> one retry on big
   v
 one row in SQLite (model used, tokens, latency, cost, status, routing reason, fallback flag)
+plus one row per attempt in request_attempts
   |
   v
 response: answer, model, tokens, latency_ms, cost_usd, route_reason, fallback_used
@@ -147,7 +148,7 @@ Groups the questions both runs share into: both passed, only A passed, only B pa
 uv run python -m app.cli.router_replay_cli --small results\eval_small-mmlu_20261126-102848.json --big results\eval_big-mmlu_20261126-102336.json --split tune
 ```
 
-Shows the score and cost the router would have had at each threshold, using the saved answers. Pick a threshold on the `tune` split, then report the `test` split. Options: `--thresholds 0,1,2,3`, `--no-fallback`.
+Shows the score and cost the router would have had at each threshold, using the saved answers. Pick a threshold on the `tune` split, then report the `test` split. Options: `--thresholds 0,1,2,3`, `--no-fallback`. The replay tools still treat a cut-off answer as a reason to escalate; the gateway now does so only when fallback_on_truncated is true.
 
 ### Cascade replay
 
@@ -179,15 +180,20 @@ A comparison page, a Gateway page, an experiments page and warnings come in a la
 
 Open http://127.0.0.1:8000/chat (the site root redirects there). Pick a model or `auto`, and send messages; the whole conversation is sent with each new message. The Inspector shows how the selected answer was handled: the model, the route reason, fallback, tokens, latency and cost. "Compare two models" sends each question on its own, without earlier messages, to two models at once and shows the answers side by side. Requests made here are recorded in the database like any other request. A navigation bar on every page links Chat and Observability and shows the gateway mode.
 
+- **Attempts:** the Inspector and the dashboard's expanded rows list every attempt (for example small failed, then big answered) with its own tokens, time and cost, plus a total.
+- **Concise answers** (on by default) puts this system message first in every request from the chat page: "Answer in plain text. Be brief unless I ask for detail. Do not use tables or LaTeX." It only affects the chat page. The database does not record whether it was on, so token and cost numbers from chats with it on and off are not comparable.
+- **Formatting:** answers show headings, bold, lists, code and tables; "Show raw text" switches back to the original text. Links, images and LaTeX are not rendered.
+- **Compare summary:** when both columns finish, a bar above them states the cost ratio, the time difference and the output-token difference, and says when a cut-off or failed column is not comparable.
+
 ## API
 
 | Endpoint | Request | Response |
 |---|---|---|
-| `POST /v1/chat` | `messages`: list of `{role, content}` (role is `system`, `user` or `assistant`; at least one). `model`: optional, `small`, `big` or `auto`. If missing, `DEFAULT_MODEL_NAME` is used. | `answer`, `model` (the model that gave the final answer), `input_tokens`, `output_tokens`, `latency_ms`, `truncated`, `requested_model`, `route_reason`, `fallback_used`, `cost_usd` |
+| `POST /v1/chat` | `messages`: list of `{role, content}` (role is `system`, `user` or `assistant`; at least one). `model`: optional, `small`, `big` or `auto`. If missing, `DEFAULT_MODEL_NAME` is used. | `answer`, `model` (the model that gave the final answer), `input_tokens`, `output_tokens`, `latency_ms`, `truncated`, `requested_model`, `route_reason`, `fallback_used`, `cost_usd`, `attempts` (one entry per provider call: model, status, tokens, time, cost, error) |
 | `GET /v1/requests` | `limit`: 1 to 200, default 20 | `items`: the newest recorded requests, one per call, with the same fields as the database row |
 | `GET /health` | none | `status`, `mode` (`real` or `fake`), `models`, `auto` |
 
-`small` and `big` go straight to that model, and `route_reason` is `explicit`. `auto` runs the rule router, and `route_reason` explains the score, for example `score 2 (threshold 2): keywords +1 [calculate], many_numbers +1 [4 numbers]`. For `auto` requests, tokens, latency and cost in the response are totals over both attempts when a fallback happened.
+`small` and `big` go straight to that model, and `route_reason` is `explicit`. `auto` runs the rule router, and `route_reason` explains the score, for example `score 2 (threshold 2): keywords +1 [calculate], many_numbers +1 [4 numbers]`. For `auto` requests, tokens, latency and cost in the response are totals over both attempts when a fallback happened. Each attempt is also stored on its own in the `request_attempts` table (created at startup, so older databases are upgraded); rows recorded before that have no attempt details.
 
 Errors: an unknown model returns 400 (`unknown_model`), a provider failure returns 502 (`provider_error`), and an invalid body returns 422.
 

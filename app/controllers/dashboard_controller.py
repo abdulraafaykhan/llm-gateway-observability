@@ -27,7 +27,11 @@ DASHBOARD_ASSETS: dict[str, str] = {
     "dashboard.js": "text/javascript",
     "dashboard.css": "text/css",
 }
-CHAT_ASSETS: dict[str, str] = {"chat.js": "text/javascript", "chat.css": "text/css"}
+CHAT_ASSETS: dict[str, str] = {
+    "chat.js": "text/javascript",
+    "markdown.js": "text/javascript",
+    "chat.css": "text/css",
+}
 SHARED_ASSETS: dict[str, str] = {"nav.js": "text/javascript", "nav.css": "text/css"}
 ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
     400: {"model": ErrorResponse},
@@ -130,5 +134,5 @@ async def recent_requests(
 ) -> RequestsResponse:
     """Return the newest recorded requests for one source and range."""
     name = service.resolve_source(source)
-    records = await service.recent(name, limit, minutes)
-    return RequestsResponse.from_records(name, records)
+    items = await service.recent(name, limit, minutes)
+    return RequestsResponse.from_records(name, items)

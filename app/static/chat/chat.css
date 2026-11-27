@@ -9,9 +9,11 @@
   --focus: #1f5fbf;
   --user-bg: #e6efff;
   --assistant-bg: #ffffff;
+  --code-bg: #eef1f5;
   --error: #b0281a;
   --error-bg: #fbe9e7;
   --warn: #8a5200;
+  --summary-bg: #eef4ff;
   --banner-bg: #fff4d6;
   --banner-text: #5c4200;
   --banner-border: #d9a400;
@@ -29,9 +31,11 @@
     --focus: #9cc2ff;
     --user-bg: #1f3152;
     --assistant-bg: #232832;
+    --code-bg: #2a3039;
     --error: #ff8a7d;
     --error-bg: #3a1d1a;
     --warn: #ffc266;
+    --summary-bg: #1c2a40;
     --banner-bg: #3a3000;
     --banner-text: #ffe08a;
     --banner-border: #b89000;
@@ -42,8 +46,16 @@
 
 [hidden] { display: none !important; }
 
+/* Full-height page: only the conversation scrolls; the text box stays at the bottom. */
+html, body { height: 100%; }
+
 body {
   margin: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -56,13 +68,15 @@ h2 { font-size: 1.1rem; margin: 0 0 0.6rem; }
 h3 { font-size: 1rem; margin: 0 0 0.4rem; }
 
 .chat-layout {
+  flex: 1;
+  min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
   gap: 1rem;
   padding: 1rem;
+  width: 100%;
   max-width: 1400px;
   margin: 0 auto;
-  align-items: start;
 }
 
 .panel {
@@ -72,6 +86,10 @@ h3 { font-size: 1rem; margin: 0 0 0.4rem; }
   padding: 1rem;
   min-width: 0;
 }
+
+.chat-panel { display: flex; flex-direction: column; min-height: 0; }
+.chat-top { flex: none; }
+.inspector { min-height: 0; overflow-y: auto; }
 
 .chat-controls { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
 .control { display: flex; gap: 0.4rem; align-items: center; }
@@ -95,6 +113,8 @@ input[type="checkbox"] { width: 1.1rem; height: 1.1rem; }
 
 .note, .muted { color: var(--muted); font-size: 14px; }
 .note { margin: 0.4rem 0; }
+details.note summary { cursor: pointer; }
+.instruction { color: var(--text); font-family: ui-monospace, Consolas, monospace; font-size: 14px; }
 
 .banner, .error {
   border-radius: 6px;
@@ -106,20 +126,22 @@ input[type="checkbox"] { width: 1.1rem; height: 1.1rem; }
 .error { background: var(--error-bg); color: var(--error); border: 2px solid var(--error); }
 
 .conversation {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 8rem;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-  min-height: 12rem;
-  max-height: 60vh;
-  overflow-y: auto;
   padding: 0.6rem;
-  margin: 0.75rem 0;
+  margin: 0.6rem 0;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 8px;
 }
 
 .bubble {
+  flex: none;
   max-width: 85%;
   padding: 0.6rem 0.8rem;
   border: 1px solid var(--border);
@@ -143,11 +165,33 @@ input[type="checkbox"] { width: 1.1rem; height: 1.1rem; }
 .selected { box-shadow: 0 0 0 3px var(--accent); }
 
 .caption { margin: 0.35rem 0 0; font-size: 14px; color: var(--muted); }
+.metrics { margin: 0 0 0.5rem; font-weight: 600; }
 .tag { margin: 0.35rem 0 0; font-size: 14px; font-weight: 700; }
 .tag-error { color: var(--error); }
 .tag-cut { color: var(--warn); }
 
+/* Rendered answers (fixed elements built by markdown.js). */
+.md { overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0 0 0.6rem; }
+.md .md-heading { margin: 0.8rem 0 0.4rem; line-height: 1.3; }
+.md h3 { font-size: 1.05rem; }
+.md h4 { font-size: 1rem; }
+.md h5, .md h6 { font-size: 0.95rem; }
+.md ul, .md ol { margin: 0 0 0.6rem; padding-left: 1.5rem; }
+.md li { margin: 0.15rem 0; }
+.md hr { border: 0; border-top: 1px solid var(--border); margin: 0.8rem 0; }
+.md code { font-family: ui-monospace, Consolas, monospace; font-size: 14px; background: var(--code-bg); padding: 0 0.25rem; border-radius: 4px; }
+.md .md-code { overflow-x: auto; background: var(--code-bg); padding: 0.6rem; border-radius: 6px; margin: 0 0 0.6rem; }
+.md .md-code code { background: none; padding: 0; white-space: pre; }
+.md .md-table-wrap { overflow-x: auto; margin: 0 0 0.6rem; }
+.md table, .attempts { border-collapse: collapse; font-size: 14px; }
+.md th, .md td, .attempts th, .attempts td { border: 1px solid var(--border); padding: 0.3rem 0.5rem; text-align: left; vertical-align: top; }
+.md th, .attempts thead th { background: var(--code-bg); }
+
 .compare-card {
+  flex: none;
   padding: 0.75rem;
   background: var(--panel);
   border: 1px solid var(--border);
@@ -156,10 +200,20 @@ input[type="checkbox"] { width: 1.1rem; height: 1.1rem; }
 
 .compare-question { margin: 0 0 0.6rem; font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
 
+.compare-summary {
+  margin: 0 0 0.6rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--summary-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.compare-summary p { margin: 0.15rem 0; }
+
 .compare-columns {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
   gap: 0.6rem;
+  align-items: start;
 }
 
 .compare-column {
@@ -173,17 +227,23 @@ input[type="checkbox"] { width: 1.1rem; height: 1.1rem; }
 
 .error-text { color: var(--error); font-weight: 600; }
 
-.composer textarea { width: 100%; min-height: 4.5rem; padding: 0.5rem; resize: vertical; }
+.composer { flex: none; }
+.composer textarea { width: 100%; min-height: 4rem; padding: 0.5rem; resize: vertical; }
 .composer-row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-top: 0.5rem; }
 
 .inspector dl {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
   gap: 0.35rem 0.75rem;
-  margin: 0;
+  margin: 0 0 1rem;
 }
 .inspector dt { color: var(--muted); font-size: 14px; }
 .inspector dd { margin: 0; overflow-wrap: anywhere; }
+
+.table-wrap { overflow-x: auto; }
+.attempts { width: 100%; }
+.attempts .attempt-error td { color: var(--error); white-space: normal; overflow-wrap: anywhere; }
+.attempts .attempt-total th, .attempts .attempt-total td { font-weight: 700; }
 
 .sr-only {
   position: absolute;
@@ -194,12 +254,17 @@ input[type="checkbox"] { width: 1.1rem; height: 1.1rem; }
   white-space: nowrap;
 }
 
+/* Narrow screens: the chat panel keeps the full height; the inspector follows below it. */
 @media (max-width: 900px) {
+  body { height: auto; overflow: auto; }
   .chat-layout { grid-template-columns: 1fr; }
+  .chat-panel { height: calc(100vh - 3.5rem); height: calc(100dvh - 3.5rem); }
+  .inspector { overflow: visible; }
 }
 
 @media (max-width: 600px) {
-  .chat-layout { padding: 0.75rem; }
+  .chat-layout { padding: 0.5rem; gap: 0.5rem; }
+  .panel { padding: 0.75rem; }
   .bubble { max-width: 100%; }
   .inspector dl { grid-template-columns: 1fr; }
 }
