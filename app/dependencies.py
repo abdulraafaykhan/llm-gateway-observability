@@ -1,5 +1,6 @@
 """Wiring for FastAPI Depends: builds the registry, provider, repository, and chat service."""
 
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
@@ -7,9 +8,12 @@ from typing import Annotated
 from fastapi import Depends
 
 from app.config import Settings, get_settings
+from app.models.completion import CompletionResult, Message
+from app.models.model_spec import ModelSpec
 from app.models.routing import RoutingConfig
-from app.providers.base import LLMProvider
+from app.providers.base import LLMProvider, ProviderError
 from app.providers.fake_provider import FakeProvider
+from app.providers.gemini_provider import GeminiProvider
 from app.providers.groq_provider import GroqProvider
 from app.repositories.base import RequestRepository
 from app.repositories.sqlite_repository import SqliteRequestRepository
@@ -31,15 +35,25 @@ def get_model_registry() -> ModelRegistry:
     return ModelRegistry(get_settings().models_config_path)
 
 
-@lru_cache
-def get_llm_provider() -> LLMProvider:
-    """Return the provider for PROVIDER_MODE (fake or Groq), built once from settings."""
-    settings = get_settings()
-    if settings.provider_mode == "fake":
-        return FakeProvider(
-            profiles=load_fake_profiles(settings.fake_config_path),
-            seed=settings.fake_seed,
-        )
+class ProviderSelector(LLMProvider):
+    """Sends each request to the provider named by the model's `provider` field."""
+
+    def __init__(self, providers: dict[str, LLMProvider]) -> None:
+        self._providers: dict[str, LLMProvider] = providers
+
+    def provider_for(self, provider_name: str) -> LLMProvider:
+        """Return the provider registered under this name, or raise ProviderError."""
+        if provider_name not in self._providers:
+            raise ProviderError(f"No provider configured for '{provider_name}'")
+        return self._providers[provider_name]
+
+    async def complete(self, model_spec: ModelSpec, messages: list[Message]) -> CompletionResult:
+        """Forward the request to the model's own provider."""
+        return await self.provider_for(model_spec.provider).complete(model_spec, messages)
+
+
+def _build_groq(settings: Settings) -> LLMProvider:
+    """Build the Groq provider, failing clearly when its key is missing."""
     if not settings.groq_api_key:
         raise ValueError("GROQ_API_KEY is required when PROVIDER_MODE=real")
     return GroqProvider(
@@ -48,6 +62,54 @@ def get_llm_provider() -> LLMProvider:
         max_output_tokens=settings.max_output_tokens,
         temperature=settings.temperature,
     )
+
+
+def _build_gemini(settings: Settings) -> LLMProvider:
+    """Build the Gemini provider, failing clearly when its key is missing."""
+    if not settings.gemini_api_key:
+        raise ValueError(
+            "GEMINI_API_KEY is required because config/models.toml has a model "
+            'with provider = "gemini"'
+        )
+    return GeminiProvider(
+        api_key=settings.gemini_api_key,
+        timeout_seconds=settings.request_timeout_seconds,
+        max_output_tokens=settings.max_output_tokens,
+        temperature=settings.temperature,
+    )
+
+
+PROVIDER_BUILDERS: dict[str, Callable[[Settings], LLMProvider]] = {
+    "groq": _build_groq,
+    "gemini": _build_gemini,
+}
+
+
+def build_llm_provider(settings: Settings, registry: ModelRegistry) -> LLMProvider:
+    """Build the provider: the fake one for every model in fake mode, else one per used name."""
+    if settings.provider_mode == "fake":
+        return FakeProvider(
+            profiles=load_fake_profiles(settings.fake_config_path),
+            seed=settings.fake_seed,
+        )
+    providers: dict[str, LLMProvider] = {}
+    for name in registry.names():
+        provider_name = registry.get(name).provider
+        if provider_name in providers:
+            continue
+        if provider_name not in PROVIDER_BUILDERS:
+            supported = ", ".join(sorted(PROVIDER_BUILDERS))
+            raise ValueError(
+                f"Unknown provider '{provider_name}' for model '{name}'. Supported: {supported}"
+            )
+        providers[provider_name] = PROVIDER_BUILDERS[provider_name](settings)
+    return ProviderSelector(providers)
+
+
+@lru_cache
+def get_llm_provider() -> LLMProvider:
+    """Return the provider for PROVIDER_MODE, built once from settings and the models file."""
+    return build_llm_provider(get_settings(), get_model_registry())
 
 
 @lru_cache

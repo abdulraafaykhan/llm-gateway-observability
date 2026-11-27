@@ -25,15 +25,24 @@ class GroqProvider(LLMProvider):
         self._max_output_tokens: int = max_output_tokens
         self._temperature: float = temperature
 
+    def build_request(self, model_spec: ModelSpec, messages: list[Message]) -> dict[str, Any]:
+        """Return the arguments for one Groq chat call; reasoning_effort only when it is set."""
+        request: dict[str, Any] = {
+            "model": model_spec.model_id,
+            "messages": [message.model_dump() for message in messages],
+            "temperature": self._temperature,
+            "max_tokens": self._max_output_tokens,
+            "timeout": self._timeout_seconds,
+        }
+        if model_spec.reasoning_effort is not None:
+            request["reasoning_effort"] = model_spec.reasoning_effort
+        return request
+
     async def complete(self, model_spec: ModelSpec, messages: list[Message]) -> CompletionResult:
         """Send the messages to Groq and return the answer and token counts."""
         try:
             response = await self._client.chat.completions.create(
-                model=model_spec.model_id,
-                messages=[message.model_dump() for message in messages],
-                temperature=self._temperature,
-                max_tokens=self._max_output_tokens,
-                timeout=self._timeout_seconds,
+                **self.build_request(model_spec, messages)
             )
         except groq.APIStatusError as error:
             detail = _status_error_detail(error)

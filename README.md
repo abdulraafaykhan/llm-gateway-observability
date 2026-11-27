@@ -158,6 +158,15 @@ uv run python -m app.cli.cascade_replay_cli --small results\eval_small-mmlu_2026
 
 Shows what "small first, escalate to big on error, cut-off or more than T output tokens" would have scored and cost, for several values of T, next to all big, all small and fallback only. It prints a tune table and a test table. "Rescued" counts questions small got wrong that the final answer got right; "lost" counts the reverse.
 
+### Gemini models
+
+```powershell
+uv run python -m app.cli.gemini_models_cli                      # list models your key can use
+uv run python -m app.cli.gemini_models_cli --probe MODEL_ID     # one "Reply with the word OK." request each
+```
+
+Put your key in `.env` as `GEMINI_API_KEY=...`; the gateway refuses to start in real mode if a model uses `provider = "gemini"` without it. To add a model, copy a commented template at the end of `config\models.toml`, remove the `#` signs and fill in the model id and prices. Groq models can set `reasoning_effort = "low" | "medium" | "high"` (`small-low` and `big-low` templates); Gemini models cannot. Gemini free tier prompts and answers may be used by Google to improve its products. Use only non-private test data with it.
+
 ## Dashboard
 
 While the gateway runs, open http://127.0.0.1:8000/dashboard. The page is read-only: it never writes to any database.
@@ -216,6 +225,7 @@ Settings are read from `.env` (copied from `.env.example`):
 | Setting | Meaning |
 |---|---|
 | `GROQ_API_KEY` | Groq key. Required in real mode, not needed in fake mode. |
+| `GEMINI_API_KEY` | Gemini key. Required in real mode only when a model uses `provider = "gemini"`. |
 | `DEFAULT_MODEL_NAME` | Model used when a request has no `model` (`big` in `.env.example`). |
 | `REQUEST_TIMEOUT_SECONDS` | Timeout for one provider call. |
 | `MAX_OUTPUT_TOKENS` | Output token limit per call. Reasoning tokens count toward it. |

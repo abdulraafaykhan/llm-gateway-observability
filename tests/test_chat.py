@@ -2,6 +2,7 @@
 
 import asyncio
 import itertools
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,8 @@ import pytest
 from app.clients.base import GatewayClient
 from app.config import Settings
 from app.dependencies import (
+    ProviderSelector,
+    build_llm_provider,
     get_chat_service,
     get_dashboard_service,
     get_demo_service,
@@ -30,6 +33,8 @@ from app.models.request_record import AttemptRecord, RequestRecord
 from app.models.routing import RouteDecision, RoutingConfig
 from app.providers import fake_provider
 from app.providers.base import LLMProvider, ProviderError
+from app.providers.gemini_provider import GeminiProvider
+from app.providers.groq_provider import GroqProvider
 from app.repositories.base import RequestRepository
 from app.repositories.sqlite_repository import CREATE_TABLE_SQL, SqliteRequestRepository
 from app.routing.base import Router
@@ -45,6 +50,16 @@ from app.services.eval_runner import EvalRunner
 from app.services.experiments_service import ExperimentsService
 from app.services.failure_types import classify_failure
 from app.services.gateway_info_service import GatewayInfoService
+from app.services.gemini_models_service import (
+    FREE_TIER_REMINDER,
+    PROBE_TEXT,
+    fetch_models,
+    generate_content_models,
+    model_note,
+    probe_model,
+    render_models_table,
+    render_probe_line,
+)
 from app.services.load_plan import build_schedule
 from app.services.model_registry import ModelRegistry
 from app.services.router_replay import build_replay_table, replay, replay_baselines
@@ -2032,3 +2047,319 @@ async def test_gateway_and_experiments_pages(tmp_path: Path) -> None:
     for path in ('"/chat"', '"/dashboard"', '"/gateway"', '"/experiments"'):
         assert path in nav_script, path
     assert_static_files_are_safe()
+
+
+GEMINI_SECRET = "gemini-test-secret-456"
+GEMINI_SPEC_FIELDS: dict[str, Any] = {
+    "input_price_per_million_tokens": 0.1,
+    "output_price_per_million_tokens": 0.4,
+}
+
+
+async def test_gemini_provider_request_response_and_errors() -> None:
+    """Gemini requests carry the key in a header only; answers, empties and errors map cleanly."""
+    requests: list[httpx.Request] = []
+    replies: list[httpx.Response | Exception] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Record the request and hand back the next canned reply."""
+        requests.append(request)
+        reply = replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    provider = GeminiProvider(
+        api_key=GEMINI_SECRET,
+        timeout_seconds=5.0,
+        max_output_tokens=64,
+        temperature=0.0,
+        transport=httpx.MockTransport(handler),
+    )
+    spec = ModelSpec(name="gem", provider="gemini", model_id="gemini-test", **GEMINI_SPEC_FIELDS)
+    messages = [
+        Message(role="system", content="Be brief."),
+        Message(role="system", content="Use English."),
+        Message(role="user", content="Hi"),
+        Message(role="assistant", content="Hello"),
+        Message(role="user", content="2+2?"),
+    ]
+    usage = {"promptTokenCount": 12, "candidatesTokenCount": 3, "thoughtsTokenCount": 20}
+    answer_parts = [{"text": "4"}, {"text": " exactly"}]
+    replies.append(
+        httpx.Response(
+            200,
+            json={
+                "candidates": [{"content": {"parts": answer_parts}, "finishReason": "STOP"}],
+                "usageMetadata": usage,
+            },
+        )
+    )
+    result = await provider.complete(spec, messages)
+    assert (result.text, result.input_tokens, result.output_tokens) == ("4 exactly", 12, 23)
+    assert result.truncated is False
+    sent = requests[0]
+    assert sent.method == "POST"
+    assert str(sent.url) == (
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent"
+    )
+    assert sent.headers["x-goog-api-key"] == GEMINI_SECRET
+    assert GEMINI_SECRET not in str(sent.url)
+    body = json.loads(sent.content)
+    assert body["systemInstruction"] == {"parts": [{"text": "Be brief.\n\nUse English."}]}
+    assert [(turn["role"], turn["parts"][0]["text"]) for turn in body["contents"]] == [
+        ("user", "Hi"),
+        ("model", "Hello"),
+        ("user", "2+2?"),
+    ]
+    assert body["generationConfig"] == {"maxOutputTokens": 64, "temperature": 0.0}
+    assert "thinkingConfig" not in body["generationConfig"]
+    assert "systemInstruction" not in provider.build_body([Message(role="user", content="Hi")])
+
+    cut_off = {"content": {"parts": [{"text": "partial"}]}, "finishReason": "MAX_TOKENS"}
+    replies.append(httpx.Response(200, json={"candidates": [cut_off]}))
+    truncated = await provider.complete(spec, messages)
+    assert (truncated.truncated, truncated.output_tokens) == (True, 0)
+
+    empty = {"content": {"parts": [{"text": "  "}]}, "finishReason": "SAFETY"}
+    blocked = {
+        "promptFeedback": {"blockReason": "SAFETY"},
+        "usageMetadata": {"promptTokenCount": 7},
+    }
+    replies.extend(
+        [
+            httpx.Response(200, json={"candidates": [empty], "usageMetadata": usage}),
+            httpx.Response(200, json=blocked),
+            httpx.Response(429, json={"error": {"message": "Resource has been exhausted"}}),
+            httpx.Response(500, json={"error": {"message": "x" * 400}}),
+            httpx.Response(403, text=f"bad key {GEMINI_SECRET}"),
+            httpx.ReadTimeout("slow"),
+            httpx.ConnectError("down"),
+        ]
+    )
+    errors: list[ProviderError] = []
+    for _ in range(7):
+        with pytest.raises(ProviderError) as caught:
+            await provider.complete(spec, messages)
+        errors.append(caught.value)
+    empty_error, blocked_error, limited, server, denied, timed_out, offline = errors
+    assert classify_failure(str(empty_error)) == "empty_answer"
+    assert (empty_error.input_tokens, empty_error.output_tokens) == (12, 23)
+    assert empty_error.finish_reason == "safety"
+    assert classify_failure(str(blocked_error)) == "empty_answer"
+    assert "block_reason=SAFETY" in str(blocked_error)
+    assert (blocked_error.input_tokens, blocked_error.finish_reason) == (7, None)
+    assert classify_failure(str(limited)) == "rate_limit"
+    assert str(server) == f"Gemini API error (HTTP 500): {'x' * 300}"
+    assert classify_failure(str(denied)) == "auth"
+    assert classify_failure(str(timed_out)) == "timeout"
+    assert str(offline) == "Could not connect to Gemini"
+    for error in errors:
+        assert GEMINI_SECRET not in str(error)
+
+
+def write_models_toml(path: Path, extra: str = "") -> Path:
+    """Write a models file with one Groq and one Gemini model, plus any extra text."""
+    path.write_text(
+        '[models.small]\nprovider = "groq"\nmodel_id = "g-small"\n'
+        "input_price_per_million_tokens = 0.1\noutput_price_per_million_tokens = 0.2\n"
+        '[models.gem]\nprovider = "gemini"\nmodel_id = "gemini-x"\n'
+        f"input_price_per_million_tokens = 0.1\noutput_price_per_million_tokens = 0.2\n{extra}",
+        encoding="utf-8",
+    )
+    return path
+
+
+async def test_provider_selection_and_model_specs(tmp_path: Path) -> None:
+    """Each model reaches its own provider; keys are checked only in real mode; specs validate."""
+    registry = ModelRegistry(write_models_toml(tmp_path / "models.toml"))
+    fake_config = str(MODELS_CONFIG_PATH.parent / "fake.toml")
+
+    def settings(mode: str, gemini_key: str | None) -> Settings:
+        """Build settings without reading .env."""
+        return Settings(
+            _env_file=None,
+            provider_mode=mode,
+            groq_api_key="groq-test-key",
+            gemini_api_key=gemini_key,
+            fake_config_path=fake_config,
+        )
+
+    selector = build_llm_provider(settings("real", GEMINI_SECRET), registry)
+    assert isinstance(selector, ProviderSelector)
+    assert isinstance(selector.provider_for("groq"), GroqProvider)
+    assert isinstance(selector.provider_for("gemini"), GeminiProvider)
+    fake = build_llm_provider(settings("fake", None), registry)
+    assert isinstance(fake, fake_provider.FakeProvider)
+    assert isinstance(
+        build_llm_provider(settings("fake", ""), registry), fake_provider.FakeProvider
+    )
+    for missing in (None, "", "   "):
+        with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+            build_llm_provider(settings("real", missing), registry)
+    with pytest.raises(ValueError, match="Unknown provider 'other'"):
+        build_llm_provider(
+            settings("real", GEMINI_SECRET),
+            ModelRegistry(
+                write_models_toml(
+                    tmp_path / "other.toml",
+                    '[models.odd]\nprovider = "other"\nmodel_id = "o"\n'
+                    "input_price_per_million_tokens = 0\noutput_price_per_million_tokens = 0\n",
+                )
+            ),
+        )
+
+    routed = ProviderSelector({"groq": FakeProvider(), "gemini": FakeProvider(should_fail=True)})
+    assert (await routed.complete(registry.get("small"), [])).text == "Paris"
+    with pytest.raises(ProviderError):
+        await routed.complete(registry.get("gem"), [])
+
+    groq = GroqProvider(
+        api_key="groq-test-key", timeout_seconds=5.0, max_output_tokens=64, temperature=0.0
+    )
+    plain = ModelSpec(name="s", provider="groq", model_id="g", **GEMINI_SPEC_FIELDS)
+    low = plain.model_copy(update={"reasoning_effort": "low"})
+    hello = [Message(role="user", content="Hi")]
+    assert "reasoning_effort" not in groq.build_request(plain, hello)
+    assert groq.build_request(low, hello)["reasoning_effort"] == "low"
+    assert groq.build_request(low, hello)["model"] == "g"
+
+    for extra in ('reasoning_effort = "max"\n', 'reasoning_effort = "low"\n'):
+        with pytest.raises(ValueError, match="reasoning_effort"):
+            ModelRegistry(write_models_toml(tmp_path / "bad.toml", extra))
+
+    shipped = ModelRegistry(MODELS_CONFIG_PATH)
+    assert shipped.names() == ["small", "big"]
+    assert [
+        (spec.model_id, spec.input_price_per_million_tokens, spec.output_price_per_million_tokens)
+        for spec in (shipped.get("small"), shipped.get("big"))
+    ] == [("openai/gpt-oss-20b", 0.075, 0.30), ("openai/gpt-oss-120b", 0.15, 0.60)]
+    assert shipped.get("small").reasoning_effort is None
+    assert shipped.get("big").reasoning_effort is None
+
+
+async def test_gemini_model_discovery_and_probe() -> None:
+    """Listing follows pages, keeps generateContent models, sorts and notes them; probes report."""
+    list_requests: list[httpx.Request] = []
+    pages = {
+        None: {
+            "models": [
+                {
+                    "name": "models/gemini-b-flash",
+                    "displayName": "B Flash",
+                    "inputTokenLimit": 1000,
+                    "outputTokenLimit": 100,
+                    "supportedGenerationMethods": ["generateContent", "countTokens"],
+                },
+                {
+                    "name": "models/embedding-x",
+                    "displayName": "Embedder",
+                    "supportedGenerationMethods": ["embedContent"],
+                },
+            ],
+            "nextPageToken": "page-2",
+        },
+        "page-2": {
+            "models": [
+                {
+                    "name": "models/gemini-a-preview-05",
+                    "displayName": "A Preview",
+                    "inputTokenLimit": 2000,
+                    "outputTokenLimit": 200,
+                    "supportedGenerationMethods": ["generateContent"],
+                },
+                {
+                    "name": "models/gemini-c-exp",
+                    "displayName": "C Exp",
+                    "supportedGenerationMethods": ["generateContent"],
+                },
+            ]
+        },
+    }
+
+    def list_handler(request: httpx.Request) -> httpx.Response:
+        """Serve the two canned list pages."""
+        list_requests.append(request)
+        return httpx.Response(200, json=pages[request.url.params.get("pageToken")])
+
+    models = await fetch_models(GEMINI_SECRET, 5.0, transport=httpx.MockTransport(list_handler))
+    assert len(list_requests) == 2
+    for request in list_requests:
+        assert request.url.path == "/v1beta/models"
+        assert request.url.params["pageSize"] == "1000"
+        assert request.headers["x-goog-api-key"] == GEMINI_SECRET
+        assert GEMINI_SECRET not in str(request.url)
+    assert list_requests[1].url.params["pageToken"] == "page-2"
+    usable = generate_content_models(models)
+    assert [model.model_id for model in usable] == [
+        "gemini-a-preview-05",
+        "gemini-b-flash",
+        "gemini-c-exp",
+    ]
+    assert [model_note(model.model_id) for model in usable] == ["preview", "", "experimental"]
+    table = render_models_table(models)
+    lines = table.splitlines()
+    assert lines[0].split() == [
+        "id",
+        "display",
+        "name",
+        "input",
+        "limit",
+        "output",
+        "limit",
+        "note",
+    ]
+    assert lines[2].split() == ["gemini-a-preview-05", "A", "Preview", "2000", "200", "preview"]
+    assert lines[3].split() == ["gemini-b-flash", "B", "Flash", "1000", "100"]
+    assert lines[4].split() == ["gemini-c-exp", "C", "Exp", "?", "?", "experimental"]
+    assert lines[-1] == FREE_TIER_REMINDER
+    assert "models/" not in table and "embedding-x" not in table
+    assert GEMINI_SECRET not in table
+
+    probe_bodies: list[dict[str, Any]] = []
+    probe_replies = [
+        httpx.Response(
+            200,
+            json={
+                "candidates": [{"content": {"parts": [{"text": "OK"}]}, "finishReason": "STOP"}],
+                "usageMetadata": {
+                    "promptTokenCount": 6,
+                    "candidatesTokenCount": 1,
+                    "thoughtsTokenCount": 9,
+                },
+            },
+        ),
+        httpx.Response(429, json={"error": {"message": "Quota exceeded"}}),
+    ]
+
+    def probe_handler(request: httpx.Request) -> httpx.Response:
+        """Record the probe body and return the next reply."""
+        probe_bodies.append(json.loads(request.content))
+        return probe_replies.pop(0)
+
+    provider = GeminiProvider(
+        api_key=GEMINI_SECRET,
+        timeout_seconds=5.0,
+        max_output_tokens=64,
+        temperature=0.0,
+        transport=httpx.MockTransport(probe_handler),
+    )
+    good = await probe_model(provider, "gemini-b-flash")
+    bad = await probe_model(provider, "gemini-c-exp")
+    assert PROBE_TEXT == "Reply with the word OK."
+    for body in probe_bodies:
+        assert body["contents"] == [{"role": "user", "parts": [{"text": PROBE_TEXT}]}]
+        assert "systemInstruction" not in body
+    assert (good.ok, good.input_tokens, good.output_tokens, good.finish_reason) == (
+        True,
+        6,
+        10,
+        "stop",
+    )
+    good_line = render_probe_line(good)
+    assert good_line.startswith("gemini-b-flash  OK  latency=")
+    assert "output_tokens=10" in good_line and "finish_reason=stop" in good_line
+    bad_line = render_probe_line(bad)
+    assert bad.ok is False and "FAILED" in bad_line
+    assert "error=Gemini API error (HTTP 429): Quota exceeded" in bad_line
+    assert GEMINI_SECRET not in good_line + bad_line
