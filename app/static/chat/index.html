@@ -11,11 +11,9 @@
   <nav id="site-nav"></nav>
 
   <main class="chat-layout">
-    <section class="panel chat-panel" aria-labelledby="chat-title">
+    <section class="panel chat-panel" aria-label="Chat">
       <div class="chat-top">
-        <h1 id="chat-title">Chat</h1>
-
-        <div class="chat-controls">
+        <div class="toolbar">
           <label class="control">
             <span>Model</span>
             <select id="model"></select>
@@ -24,7 +22,7 @@
             <input type="checkbox" id="compare">
             <span>Compare two models</span>
           </label>
-          <span id="compare-pickers" class="chat-controls" hidden>
+          <span id="compare-pickers" class="toolbar-group" hidden>
             <label class="control">
               <span>Left model</span>
               <select id="left-model"></select>
@@ -38,32 +36,31 @@
             <input type="checkbox" id="concise" checked>
             <span>Concise answers</span>
           </label>
+          <label class="control">
+            <input type="checkbox" id="raw">
+            <span>Show raw text</span>
+          </label>
           <button type="button" id="new-chat">New chat</button>
         </div>
 
-        <details class="note">
-          <summary>What does this send?</summary>
+        <details class="about">
+          <summary>About this page</summary>
           <p>With "Concise answers" ticked, each request starts with this system message (not shown in the chat):</p>
           <p id="concise-text" class="instruction"></p>
+          <p>Requests made here are recorded in the database like any other request.</p>
+          <p>Compare mode sends each question on its own, without earlier messages.</p>
         </details>
 
         <p id="fake-banner" class="banner" hidden>Fake mode: answers are simulated placeholders, not real model output.</p>
-        <p class="note">Requests made here are recorded in the database like any other request.</p>
-        <p id="compare-note" class="note" hidden>Compare mode sends each question on its own, without earlier messages.</p>
         <p id="page-error" class="error" role="alert" hidden></p>
-
-        <label class="control">
-          <input type="checkbox" id="raw">
-          <span>Show raw text</span>
-        </label>
       </div>
 
       <div id="conversation" class="conversation" aria-live="polite" aria-label="Conversation"></div>
 
       <form id="composer" class="composer">
         <label for="input" class="sr-only">Message</label>
-        <textarea id="input" rows="3" placeholder="Ask a question. Enter sends, Shift+Enter adds a new line."></textarea>
-        <div class="composer-row">
+        <textarea id="input" rows="2" placeholder="Ask a question. Enter sends, Shift+Enter adds a new line."></textarea>
+        <div class="send-column">
           <button type="submit" id="send" class="primary">Send</button>
           <span id="waiting" class="muted"></span>
         </div>

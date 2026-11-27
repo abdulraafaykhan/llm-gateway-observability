@@ -46,7 +46,10 @@
 
 [hidden] { display: none !important; }
 
-/* Full-height page: only the conversation scrolls; the text box stays at the bottom. */
+/*
+ * The page is exactly one viewport tall: the navigation on top, then the chat card, whose
+ * message area takes the remaining height and is the only part that scrolls.
+ */
 html, body { height: 100%; }
 
 body {
@@ -63,17 +66,20 @@ body {
   line-height: 1.45;
 }
 
-h1 { font-size: 1.3rem; margin: 0 0 0.6rem; }
+#site-nav { flex: none; }
+
 h2 { font-size: 1.1rem; margin: 0 0 0.6rem; }
 h3 { font-size: 1rem; margin: 0 0 0.4rem; }
 
 .chat-layout {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+  grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: 1rem;
-  padding: 1rem;
+  padding: 0.75rem 1rem;
   width: 100%;
   max-width: 1400px;
   margin: 0 auto;
@@ -83,16 +89,24 @@ h3 { font-size: 1rem; margin: 0 0 0.4rem; }
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 1rem;
+  padding: 0.75rem;
   min-width: 0;
 }
 
-.chat-panel { display: flex; flex-direction: column; min-height: 0; }
+.chat-panel { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
 .chat-top { flex: none; }
-.inspector { min-height: 0; overflow-y: auto; }
 
-.chat-controls { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
-.control { display: flex; gap: 0.4rem; align-items: center; }
+/* Stays in view while messages scroll; scrolls on its own if it is taller than the page. */
+.inspector {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100%;
+  overflow-y: auto;
+}
+
+.toolbar, .toolbar-group { display: flex; flex-wrap: wrap; gap: 0.4rem 0.75rem; align-items: center; }
+.control { display: flex; gap: 0.35rem; align-items: center; white-space: nowrap; }
 
 button, select, textarea {
   font: inherit;
@@ -103,32 +117,34 @@ button, select, textarea {
   border-radius: 6px;
 }
 
-button, select { padding: 0.35rem 0.7rem; cursor: pointer; }
+button, select { padding: 0.3rem 0.65rem; cursor: pointer; }
 button:disabled, select:disabled { opacity: 0.6; cursor: not-allowed; }
-input[type="checkbox"] { width: 1.1rem; height: 1.1rem; }
+input[type="checkbox"] { width: 1.1rem; height: 1.1rem; margin: 0; }
 
 .primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 
 :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 
-.note, .muted { color: var(--muted); font-size: 14px; }
-.note { margin: 0.4rem 0; }
-details.note summary { cursor: pointer; }
-.instruction { color: var(--text); font-family: ui-monospace, Consolas, monospace; font-size: 14px; }
+.muted { color: var(--muted); font-size: 14px; }
+
+.about { margin: 0.4rem 0 0; color: var(--muted); font-size: 14px; }
+.about summary { cursor: pointer; width: max-content; max-width: 100%; }
+.about p { margin: 0.3rem 0; }
+.instruction { color: var(--text); font-family: ui-monospace, Consolas, monospace; }
 
 .banner, .error {
   border-radius: 6px;
-  padding: 0.6rem 0.8rem;
+  padding: 0.5rem 0.75rem;
   font-weight: 700;
-  margin: 0.6rem 0;
+  margin: 0.5rem 0 0;
 }
 .banner { background: var(--banner-bg); color: var(--banner-text); border: 2px solid var(--banner-border); }
 .error { background: var(--error-bg); color: var(--error); border: 2px solid var(--error); }
 
 .conversation {
   position: relative;
-  flex: 1 1 auto;
-  min-height: 8rem;
+  flex: 1 1 0;
+  min-height: 50vh;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -186,9 +202,9 @@ details.note summary { cursor: pointer; }
 .md .md-code { overflow-x: auto; background: var(--code-bg); padding: 0.6rem; border-radius: 6px; margin: 0 0 0.6rem; }
 .md .md-code code { background: none; padding: 0; white-space: pre; }
 .md .md-table-wrap { overflow-x: auto; margin: 0 0 0.6rem; }
-.md table, .attempts { border-collapse: collapse; font-size: 14px; }
-.md th, .md td, .attempts th, .attempts td { border: 1px solid var(--border); padding: 0.3rem 0.5rem; text-align: left; vertical-align: top; }
-.md th, .attempts thead th { background: var(--code-bg); }
+.md table { border-collapse: collapse; font-size: 14px; }
+.md th, .md td { border: 1px solid var(--border); padding: 0.3rem 0.5rem; text-align: left; vertical-align: top; }
+.md th { background: var(--code-bg); }
 
 .compare-card {
   flex: none;
@@ -198,16 +214,18 @@ details.note summary { cursor: pointer; }
   border-radius: 10px;
 }
 
-.compare-question { margin: 0 0 0.6rem; font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
+.compare-question { margin: 0 0 0.5rem; font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .compare-summary {
-  margin: 0 0 0.6rem;
-  padding: 0.5rem 0.75rem;
+  margin: 0 0 0.5rem;
+  padding: 0.35rem 0.65rem;
   background: var(--summary-bg);
   border: 1px solid var(--border);
   border-radius: 8px;
+  font-size: 14px;
+  line-height: 1.35;
 }
-.compare-summary p { margin: 0.15rem 0; }
+.compare-summary p { margin: 0; }
 
 .compare-columns {
   display: grid;
@@ -227,9 +245,13 @@ details.note summary { cursor: pointer; }
 
 .error-text { color: var(--error); font-weight: 600; }
 
-.composer { flex: none; }
-.composer textarea { width: 100%; min-height: 4rem; padding: 0.5rem; resize: vertical; }
-.composer-row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-top: 0.5rem; }
+/* Text box and Send button on one row, always at the bottom of the card. */
+.composer { flex: none; display: flex; gap: 0.5rem; align-items: stretch; }
+.composer textarea { flex: 1; min-width: 0; min-height: 3.2rem; padding: 0.45rem 0.6rem; resize: vertical; }
+.send-column { flex: none; display: flex; flex-direction: column; gap: 0.2rem; min-width: 5.5rem; }
+.send-column button { flex: 1; }
+.send-column #waiting:empty { display: none; }
+#waiting { white-space: nowrap; text-align: center; }
 
 .inspector dl {
   display: grid;
@@ -240,9 +262,24 @@ details.note summary { cursor: pointer; }
 .inspector dt { color: var(--muted); font-size: 14px; }
 .inspector dd { margin: 0; overflow-wrap: anywhere; }
 
-.table-wrap { overflow-x: auto; }
-.attempts { width: 100%; }
-.attempts .attempt-error td { color: var(--error); white-space: normal; overflow-wrap: anywhere; }
+/* Attempts table: fixed column widths so it always fits the inspector without scrolling. */
+.attempts { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 14px; }
+.attempts th, .attempts td {
+  border: 1px solid var(--border);
+  padding: 0.2rem 0.25rem;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.attempts thead th { background: var(--code-bg); }
+.attempts th:nth-child(1) { width: 7%; }
+.attempts th:nth-child(2) { width: 14%; }
+.attempts th:nth-child(3) { width: 20%; }
+.attempts th:nth-child(4) { width: 11%; }
+.attempts th:nth-child(5) { width: 12%; }
+.attempts th:nth-child(6) { width: 15%; }
+.attempts th:nth-child(7) { width: 21%; }
+.attempts .attempt-error td { color: var(--error); }
 .attempts .attempt-total th, .attempts .attempt-total td { font-weight: 700; }
 
 .sr-only {
@@ -254,17 +291,17 @@ details.note summary { cursor: pointer; }
   white-space: nowrap;
 }
 
-/* Narrow screens: the chat panel keeps the full height; the inspector follows below it. */
+/* Narrow screens: the chat card keeps the viewport height; the inspector follows below it. */
 @media (max-width: 900px) {
-  body { height: auto; overflow: auto; }
-  .chat-layout { grid-template-columns: 1fr; }
-  .chat-panel { height: calc(100vh - 3.5rem); height: calc(100dvh - 3.5rem); }
-  .inspector { overflow: visible; }
+  body { height: auto; min-height: 100vh; overflow-y: auto; }
+  .chat-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; }
+  .chat-panel { height: calc(100vh - 5rem); height: calc(100dvh - 5rem); overflow-y: visible; }
+  .inspector { position: static; max-height: none; overflow: visible; }
 }
 
 @media (max-width: 600px) {
   .chat-layout { padding: 0.5rem; gap: 0.5rem; }
-  .panel { padding: 0.75rem; }
   .bubble { max-width: 100%; }
-  .inspector dl { grid-template-columns: 1fr; }
+  .inspector dl { grid-template-columns: minmax(0, 1fr); }
+  .control { white-space: normal; }
 }

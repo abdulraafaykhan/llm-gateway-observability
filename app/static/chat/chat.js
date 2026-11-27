@@ -160,8 +160,12 @@ const cutOffLabel = () => el("p", { class: "tag tag-cut" }, ["Answer was cut off
 
 function attemptsTable(reply) {
   const attempts = reply.attempts || [];
-  const labels = ["#", "Model", "Status", "Tokens in", "Tokens out", "Time", "Cost"];
-  const head = el("thead", {}, [el("tr", {}, labels.map((label) => el("th", { scope: "col" }, [label])))]);
+  const labels = [
+    ["#", "Attempt number"], ["Model", "Model"], ["Status", "Status"], ["In", "Tokens in"],
+    ["Out", "Tokens out"], ["Time", "Time of this call"], ["Cost", "Cost of this call"],
+  ];
+  const head = el("thead", {}, [el("tr", {}, labels.map(([label, full]) =>
+    el("th", { scope: "col", title: full }, [label])))]);
   const rows = [];
   for (const attempt of attempts) {
     rows.push(el("tr", {}, [
@@ -291,14 +295,17 @@ function compareSentences(outcomes) {
   const seconds = (slow.reply.latency_ms - fast.reply.latency_ms) / 1000;
   sentences.push(seconds < 0.05 ? "Both took about the same time." : `${slow.label} was ${seconds.toFixed(1)} s slower than ${fast.label}.`);
   const cutOff = [a, b].filter((side) => side.reply.truncated);
-  if (cutOff.length) {
-    for (const side of cutOff) sentences.push(`${side.label} was cut off, so its length is not comparable.`);
+  if (cutOff.length === 2) {
+    sentences.push(`${a.label} and ${b.label} were cut off, so their lengths are not comparable.`);
+  } else if (cutOff.length === 1) {
+    sentences.push(`${cutOff[0].label} was cut off, so its length is not comparable.`);
   } else {
+    // Keep the bar to three lines: skip the token sentence when the counts are within 10%.
     const [more, fewer] = pickMore(a, b, (side) => side.reply.output_tokens);
     const difference = more.reply.output_tokens - fewer.reply.output_tokens;
-    sentences.push(difference === 0
-      ? "Both wrote the same number of output tokens."
-      : `${more.label} wrote ${difference} more output tokens than ${fewer.label} (${more.reply.output_tokens} vs ${fewer.reply.output_tokens}).`);
+    if (difference >= 0.1 * more.reply.output_tokens && difference > 0) {
+      sentences.push(`${more.label} wrote ${difference} more output tokens than ${fewer.label} (${more.reply.output_tokens} vs ${fewer.reply.output_tokens}).`);
+    }
   }
   return sentences;
 }
@@ -389,7 +396,6 @@ function onCompareToggle() {
   const on = byId("compare").checked;
   byId("model").disabled = on;
   byId("compare-pickers").hidden = !on;
-  byId("compare-note").hidden = !on;
 }
 
 function fillSelect(select, names, selected) {
