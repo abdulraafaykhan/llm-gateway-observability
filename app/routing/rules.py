@@ -9,7 +9,9 @@ NUMBER_PATTERN = re.compile(r"\d+(?:\.\d+)?")
 
 
 class RoutingRule(ABC):
-    """Interface for one scoring rule."""
+    """Interface for one scoring rule; `name` is the rule name used in its hits."""
+
+    name: str = ""
 
     @abstractmethod
     def score(self, text: str) -> RuleHit | None:
@@ -18,6 +20,8 @@ class RoutingRule(ABC):
 
 class LongQuestionRule(RoutingRule):
     """Adds 1 point for a medium-length question and 2 for a long one."""
+
+    name = "long_question"
 
     def __init__(self, medium_words: int, long_words: int) -> None:
         self._medium_words: int = medium_words
@@ -32,11 +36,13 @@ class LongQuestionRule(RoutingRule):
             points = 1
         else:
             return None
-        return RuleHit(rule="long_question", points=points, detail=f"{word_count} words")
+        return RuleHit(rule=self.name, points=points, detail=f"{word_count} words")
 
 
 class KeywordsRule(RoutingRule):
     """Adds points once when any keyword appears (case-insensitive)."""
+
+    name = "keywords"
 
     def __init__(self, points: int, keywords: list[str]) -> None:
         self._points: int = points
@@ -47,12 +53,14 @@ class KeywordsRule(RoutingRule):
         lowered = text.lower()
         for keyword in self._keywords:
             if keyword in lowered:
-                return RuleHit(rule="keywords", points=self._points, detail=keyword)
+                return RuleHit(rule=self.name, points=self._points, detail=keyword)
         return None
 
 
 class ManyNumbersRule(RoutingRule):
     """Adds points when the question contains at least min_numbers numbers."""
+
+    name = "many_numbers"
 
     def __init__(self, points: int, min_numbers: int) -> None:
         self._points: int = points
@@ -63,11 +71,13 @@ class ManyNumbersRule(RoutingRule):
         count = len(NUMBER_PATTERN.findall(text))
         if count < self._min_numbers:
             return None
-        return RuleHit(rule="many_numbers", points=self._points, detail=f"{count} numbers")
+        return RuleHit(rule=self.name, points=self._points, detail=f"{count} numbers")
 
 
 class MultipleQuestionsRule(RoutingRule):
     """Adds points when the text asks several questions (counted by question marks)."""
+
+    name = "multiple_questions"
 
     def __init__(self, points: int, min_question_marks: int) -> None:
         self._points: int = points
@@ -79,4 +89,4 @@ class MultipleQuestionsRule(RoutingRule):
         if count < self._min_question_marks:
             return None
         detail = f"{count} question marks"
-        return RuleHit(rule="multiple_questions", points=self._points, detail=detail)
+        return RuleHit(rule=self.name, points=self._points, detail=detail)

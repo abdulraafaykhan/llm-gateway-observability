@@ -17,6 +17,10 @@ class RuleRouter(Router):
         self._big_model: str = big_model
         self._threshold: int = threshold
 
+    def rule_names(self) -> list[str]:
+        """Return the names of the rules, in the order they are scored."""
+        return [rule.name for rule in self._rules]
+
     def choose(self, messages: list[Message]) -> RouteDecision:
         """Pick big when the total score is at or above the threshold, otherwise small."""
         text = routed_text(messages)

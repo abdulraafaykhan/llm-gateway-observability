@@ -17,7 +17,10 @@ from app.routing.base import Router
 from app.routing.factory import build_rule_router
 from app.services.chat_service import ChatService
 from app.services.dashboard_service import DashboardService
+from app.services.demo_service import DemoService
+from app.services.experiments_service import ExperimentsService
 from app.services.fake_profiles import load_fake_profiles
+from app.services.gateway_info_service import GatewayInfoService
 from app.services.model_registry import ModelRegistry
 from app.services.routing_config import load_routing_config
 
@@ -98,3 +101,49 @@ def get_chat_service(
         routing_config=routing_config,
         default_model_name=settings.default_model_name,
     )
+
+
+@lru_cache
+def get_gateway_info_service() -> GatewayInfoService:
+    """Return the Gateway page service, built once (it reads the gateway's own database)."""
+    return GatewayInfoService(
+        settings=get_settings(),
+        registry=get_model_registry(),
+        routing_config=get_routing_config(),
+        router=get_router(),
+        repository=get_request_repository(),
+    )
+
+
+@lru_cache
+def get_experiments_service() -> ExperimentsService:
+    """Return the Experiments page service, built once from the results folder."""
+    return ExperimentsService(get_settings().results_dir, get_routing_config())
+
+
+@lru_cache
+def get_demo_service() -> DemoService:
+    """Return the demo service; its requests go through the same ChatService path as real ones."""
+    settings = get_settings()
+    registry = get_model_registry()
+    chat_service = ChatService(
+        provider=get_llm_provider(),
+        registry=registry,
+        repository=get_request_repository(),
+        router=get_router(),
+        routing_config=get_routing_config(),
+        default_model_name=settings.default_model_name,
+    )
+    return DemoService(
+        chat_service=chat_service,
+        model_names=registry.names(),
+        provider_mode=settings.provider_mode,
+        database_file=Path(settings.database_path).name,
+        questions_dir=settings.load_questions_dir,
+    )
+
+
+async def stop_running_demo() -> None:
+    """Cancel a running demo at shutdown, if the demo service was ever built."""
+    if get_demo_service.cache_info().currsize:
+        await get_demo_service().stop()

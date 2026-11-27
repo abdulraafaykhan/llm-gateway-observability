@@ -12,3 +12,7 @@ class Router(ABC):
     @abstractmethod
     def choose(self, messages: list[Message]) -> RouteDecision:
         """Return the chosen model name with the reason."""
+
+    def rule_names(self) -> list[str]:
+        """Return the names of the rules this router scores with (none by default)."""
+        return []

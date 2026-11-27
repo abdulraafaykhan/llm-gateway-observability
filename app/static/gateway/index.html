@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM Gateway: Gateway</title>
+  <link rel="stylesheet" href="/shared/nav.css">
+  <link rel="stylesheet" href="/gateway/assets/gateway.css">
+</head>
+<body>
+  <nav id="site-nav"></nav>
+
+  <main class="page">
+    <h1>Gateway</h1>
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <section class="panel" aria-labelledby="models-title">
+      <div class="panel-head">
+        <h2 id="models-title">Models</h2>
+        <div class="controls">
+          <div class="ranges" role="group" aria-label="Time range">
+            <button type="button" data-minutes="15" aria-pressed="false">15 min</button>
+            <button type="button" data-minutes="60" aria-pressed="true">1 hour</button>
+            <button type="button" data-minutes="1440" aria-pressed="false">24 hours</button>
+          </div>
+          <button type="button" id="live" aria-pressed="false">Live: off</button>
+          <span id="updated" class="muted">Loading...</span>
+        </div>
+      </div>
+      <p class="muted">Prices are per million tokens. Live numbers come from every attempt (including failed and fallback attempts) in the selected range.</p>
+      <div class="table-wrap">
+        <table id="table-models">
+          <thead>
+            <tr>
+              <th scope="col">Model</th><th scope="col">Provider</th><th scope="col">Model id</th>
+              <th scope="col">Input price</th><th scope="col">Output price</th>
+              <th scope="col">Attempts</th><th scope="col">Error rate</th><th scope="col">Rate-limit errors</th>
+              <th scope="col">p50</th><th scope="col">p95</th><th scope="col">Avg output tokens</th>
+              <th scope="col">Cost</th><th scope="col">Health</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="settings-title">
+      <h2 id="settings-title">Settings (read-only)</h2>
+      <div class="two-lists">
+        <div>
+          <h3>Gateway</h3>
+          <dl id="settings-gateway" class="kv"></dl>
+        </div>
+        <div>
+          <h3>Routing</h3>
+          <dl id="settings-routing" class="kv"></dl>
+        </div>
+      </div>
+      <h3>Routing rules</h3>
+      <div class="table-wrap">
+        <table id="table-rules">
+          <thead><tr><th scope="col">Rule</th><th scope="col">What it does</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="preview-title">
+      <h2 id="preview-title">Route preview</h2>
+      <p class="muted">This only runs the rules. No model is called and nothing is recorded.</p>
+      <form id="preview-form" class="preview-form">
+        <label for="preview-input" class="sr-only">Question to preview</label>
+        <textarea id="preview-input" rows="3" maxlength="4000" placeholder="Type a question to see where the router would send it."></textarea>
+        <button type="submit" id="preview-button" class="primary">Preview</button>
+      </form>
+      <div id="preview-result" aria-live="polite"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="demo-title">
+      <h2 id="demo-title">Demo traffic</h2>
+      <p id="demo-availability" class="muted">Loading...</p>
+      <p id="demo-note" class="muted"></p>
+      <form id="demo-form" class="demo-form">
+        <label class="control">
+          <span>Scenario</span>
+          <select id="demo-scenario"></select>
+        </label>
+        <label class="control">
+          <span>Model</span>
+          <select id="demo-model"></select>
+        </label>
+        <label class="control">
+          <span>Questions file</span>
+          <select id="demo-questions"></select>
+        </label>
+        <button type="submit" id="demo-start" class="primary">Start</button>
+        <button type="button" id="demo-stop">Stop</button>
+      </form>
+      <p id="demo-message" class="error" role="alert" hidden></p>
+      <div id="demo-progress" class="demo-progress">
+        <progress id="demo-bar" max="1" value="0" aria-label="Completed requests"></progress>
+        <p id="demo-counts" class="muted"></p>
+      </div>
+    </section>
+  </main>
+
+  <script src="/shared/nav.js" defer></script>
+  <script src="/gateway/assets/gateway.js" defer></script>
+</body>
+</html>

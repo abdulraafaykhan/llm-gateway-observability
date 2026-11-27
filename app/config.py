@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     fake_seed: int = 42
     routing_config_path: str = "config/routing.toml"
     dashboard_data_dir: str = "data"
+    results_dir: str = "results"
+    load_questions_dir: str = "config"
 
 
 @lru_cache

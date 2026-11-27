@@ -12,7 +12,15 @@ import httpx
 import pytest
 
 from app.clients.base import GatewayClient
-from app.dependencies import get_chat_service, get_dashboard_service, sqlite_repository_factory
+from app.config import Settings
+from app.dependencies import (
+    get_chat_service,
+    get_dashboard_service,
+    get_demo_service,
+    get_experiments_service,
+    get_gateway_info_service,
+    sqlite_repository_factory,
+)
 from app.main import create_app
 from app.models.completion import CompletionResult, Message
 from app.models.eval import EvalOutcome, EvalQuestion, EvalRunResult, GatewayReply
@@ -29,14 +37,17 @@ from app.routing.factory import build_rule_router
 from app.services.cascade_replay import build_cascade_table, escalate
 from app.services.chat_service import ChatService
 from app.services.dashboard_service import DashboardService
+from app.services.demo_service import DemoService
 from app.services.eval_checker import check_answer
 from app.services.eval_loader import load_eval_set
 from app.services.eval_report import compare_runs, summarize
 from app.services.eval_runner import EvalRunner
+from app.services.experiments_service import ExperimentsService
 from app.services.failure_types import classify_failure
+from app.services.gateway_info_service import GatewayInfoService
 from app.services.load_plan import build_schedule
 from app.services.model_registry import ModelRegistry
-from app.services.router_replay import replay, replay_baselines
+from app.services.router_replay import build_replay_table, replay, replay_baselines
 from app.services.routing_config import load_routing_config, validate_routing_models
 from app.services.stats_service import StatsService, compute_group_stats, percentile
 from app.views.cascade_text_view import render_cascade_tables
@@ -1681,4 +1692,343 @@ async def test_fallback_setting_and_chat_assets(tmp_path: Path) -> None:
     assert markdown_at < page.text.index('src="/chat/assets/chat.js"')
     chat_script = (STATIC_ROOT / "chat" / "chat.js").read_text(encoding="utf-8")
     assert chat_script.count(CONCISE_INSTRUCTION) == 1
+    assert_static_files_are_safe()
+
+
+def app_client(dependency: Any, service: Any) -> httpx.AsyncClient:
+    """Build a client for an app with one service dependency replaced."""
+    app = create_app()
+    app.dependency_overrides[dependency] = lambda: service
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+
+
+async def test_gateway_info_models_config_and_preview(tmp_path: Path) -> None:
+    """Model health comes from attempts; config has no secrets; route preview writes nothing."""
+    models_path = tmp_path / "models.toml"
+    models_path.write_text(
+        MODELS_CONFIG_PATH.read_text(encoding="utf-8")
+        + '\n[models.idle]\nprovider = "groq"\nmodel_id = "idle-model"\n'
+        "input_price_per_million_tokens = 0.1\noutput_price_per_million_tokens = 0.2\n",
+        encoding="utf-8",
+    )
+    registry = ModelRegistry(models_path)
+    repository = SqliteRequestRepository(tmp_path / "gateway.db")
+    await repository.initialize()
+    rate_limit = "Groq API error (HTTP 429): Rate limit reached for model"
+    empty = "Groq returned an empty answer (finish_reason=length, output_tokens=4096)"
+    rows = [
+        (5, [make_attempt(output_tokens=100, latency_ms=100.0, cost_usd=0.001)]),
+        (5, [make_attempt(output_tokens=200, latency_ms=200.0, cost_usd=0.002)]),
+        (
+            4,
+            [make_attempt(status="truncated", output_tokens=900, latency_ms=300.0, cost_usd=0.003)],
+        ),
+        (
+            4,
+            [
+                make_attempt(
+                    model_name="small",
+                    status="error",
+                    error_message=rate_limit,
+                    output_tokens=0,
+                    latency_ms=50.0,
+                    cost_usd=0.0,
+                ),
+                make_attempt(attempt=2, output_tokens=300, latency_ms=400.0, cost_usd=0.004),
+            ],
+        ),
+        (
+            3,
+            [
+                make_attempt(
+                    model_name="small",
+                    status="error",
+                    error_message=empty,
+                    input_tokens=20,
+                    output_tokens=4096,
+                    latency_ms=900.0,
+                    cost_usd=0.0012,
+                )
+            ],
+        ),
+        (
+            2,
+            [make_attempt(model_name="small", output_tokens=50, latency_ms=150.0, cost_usd=0.0005)],
+        ),
+        (300, [make_attempt(status="error", error_message="Request timed out")]),
+    ]
+    for age, attempts in rows:
+        await repository.add(make_record(created_at=minutes_ago(age)), attempts)
+    secret = "test-secret-key-123"
+    settings = Settings(groq_api_key=secret, provider_mode="fake", database_path="data/fake.db")
+    routing_config = load_routing_config(str(ROUTING_CONFIG_PATH))
+    service = GatewayInfoService(
+        settings, registry, routing_config, build_rule_router(routing_config), repository
+    )
+    rows_before = len(await repository.list_all())
+    async with app_client(get_gateway_info_service, service) as client:
+        health = (await client.get("/api/gateway/models", params={"minutes": 60})).json()
+        config_response = await client.get("/api/gateway/config")
+        plain = (
+            await client.post("/api/gateway/route-preview", json={"question": "Hi there"})
+        ).json()
+        hard_question = "Calculate the total of 12, 15 and 18 dollars. Round to 2 decimal places."
+        hard = (
+            await client.post("/api/gateway/route-preview", json={"question": hard_question})
+        ).json()
+        too_short = await client.post("/api/gateway/route-preview", json={"question": ""})
+        too_long = await client.post("/api/gateway/route-preview", json={"question": "a" * 4001})
+
+    models = {entry["name"]: entry for entry in health["models"]}
+    assert list(models) == ["small", "big", "idle"]
+    big, small, idle = models["big"], models["small"], models["idle"]
+    assert (big["attempts"], big["answered"], big["truncated"], big["errors"]) == (4, 4, 1, 0)
+    assert (big["p50_ms"], big["p95_ms"], big["avg_output_tokens"]) == (200.0, 400.0, 375.0)
+    assert big["cost_usd"] == pytest.approx(0.01)
+    assert (big["error_rate_percent"], big["health"]) == (0.0, "Healthy")
+    assert (small["attempts"], small["answered"], small["errors"]) == (3, 1, 2)
+    assert (small["rate_limit_errors"], small["health"]) == (1, "Degraded")
+    assert small["error_rate_percent"] == pytest.approx(200 / 3)
+    assert (small["p50_ms"], small["p95_ms"], small["avg_output_tokens"]) == (150.0, 150.0, 50.0)
+    assert small["cost_usd"] == pytest.approx(0.0017)
+    assert (idle["attempts"], idle["p50_ms"], idle["avg_output_tokens"]) == (0, None, None)
+    assert idle["health"] == "No recent traffic"
+
+    config = config_response.json()
+    assert [model["name"] for model in config["models"]] == ["small", "big", "idle"]
+    assert config["models"][2]["output_price_per_million_tokens"] == 0.2
+    assert (config["routing"]["threshold"], config["database_file"]) == (2, "fake.db")
+    text = config_response.text
+    for forbidden in ("GROQ_API_KEY", "groq_api_key", secret, "data/", "config/", "\\"):
+        assert forbidden not in text, forbidden
+
+    all_rules = ["long_question", "keywords", "many_numbers", "multiple_questions"]
+    assert (plain["model"], plain["score"], plain["not_fired"]) == ("small", 0, all_rules)
+    assert (hard["model"], hard["score"]) == ("big", 2)
+    assert [(hit["rule"], hit["points"]) for hit in hard["hits"]] == [
+        ("keywords", 1),
+        ("many_numbers", 1),
+    ]
+    assert hard["not_fired"] == ["long_question", "multiple_questions"]
+    assert (too_short.status_code, too_long.status_code) == (422, 422)
+    assert len(await repository.list_all()) == rows_before
+
+
+def experiment_outcome(
+    question_id: str, status: str, split: str, difficulty: str = "easy", cost: float = 0.001
+) -> EvalOutcome:
+    """Build a saved outcome with a split and a cost."""
+    return make_outcome(question_id, status, difficulty).model_copy(
+        update={"split": split, "cost_usd": cost, "question": f"Question {question_id}?"}
+    )
+
+
+async def test_experiments_runs_replay_and_compare(tmp_path: Path) -> None:
+    """Runs, replays, and comparisons equal the existing functions' results."""
+    results = tmp_path / "results"
+    results.mkdir()
+    small = make_run(
+        "small",
+        [
+            experiment_outcome("q1", "passed", "tune"),
+            experiment_outcome("q2", "failed", "test", "hard"),
+            experiment_outcome("q3", "error", "tune", "hard", 0.0),
+            experiment_outcome("q4", "passed", "test"),
+        ],
+    ).model_copy(update={"created_at": "2026-11-26T08:00:00+00:00"})
+    big = make_run(
+        "big",
+        [
+            experiment_outcome("q1", "passed", "tune", cost=0.01),
+            experiment_outcome("q2", "passed", "test", "hard", 0.01),
+            experiment_outcome("q3", "passed", "tune", "hard", 0.01),
+            experiment_outcome("q4", "failed", "test", cost=0.01),
+        ],
+    ).model_copy(update={"created_at": "2026-11-26T09:00:00+00:00"})
+    (results / "eval_small_1.json").write_text(small.model_dump_json(), encoding="utf-8")
+    (results / "eval_big_1.json").write_text(big.model_dump_json(), encoding="utf-8")
+    (results / "eval_bad.json").write_text("{not json", encoding="utf-8")
+    (results / "notes.json").write_text(small.model_dump_json(), encoding="utf-8")
+    routing_config = load_routing_config(str(ROUTING_CONFIG_PATH))
+    service = ExperimentsService(str(results), routing_config)
+    files = {"small": "eval_small_1.json", "big": "eval_big_1.json"}
+    async with app_client(get_experiments_service, service) as client:
+        listing = (await client.get("/api/experiments/runs")).json()
+        tune = (await client.get("/api/experiments/runs", params={"split": "tune"})).json()
+        replay_body = (await client.get("/api/experiments/replay", params=files)).json()
+        compare_body = (
+            await client.get(
+                "/api/experiments/compare", params={"a": files["small"], "b": files["big"]}
+            )
+        ).json()
+        bad = [
+            await client.get("/api/experiments/replay", params={"small": name, "big": files["big"]})
+            for name in ("../eval_small_1.json", "sub/eval_small_1.json", "eval_missing.json")
+        ]
+
+    assert [run["file"] for run in listing["runs"]] == ["eval_big_1.json", "eval_small_1.json"]
+    assert [item["file"] for item in listing["skipped"]] == ["eval_bad.json"]
+    for run_info, run in zip(listing["runs"], (big, small), strict=True):
+        summary = summarize(run)
+        assert (run_info["passed"], run_info["errors"]) == (summary.passed, summary.errors)
+        assert run_info["score_percent"] == pytest.approx(summary.score_percent)
+        assert run_info["total_cost_usd"] == pytest.approx(summary.total_cost_usd)
+    tune_small = next(run for run in tune["runs"] if run["file"] == files["small"])
+    assert (tune_small["questions"], tune_small["passed"]) == (2, 1)
+
+    router = build_replay_table(small, big, routing_config, [0, 1, 2, 3, 4, 5], True, "all")
+    cascade = build_cascade_table(small, big, "all", [500, 1000, 1500, 2000, 3000, 4000])
+    assert [(row["label"], row["passed"]) for row in replay_body["router_rows"]] == [
+        (row.label, row.passed) for row in router.rows
+    ]
+    assert [row["cost_usd"] for row in replay_body["router_rows"]] == pytest.approx(
+        [row.cost_usd for row in router.rows]
+    )
+    assert [
+        (row["label"], row["escalated"], row["passed"]) for row in replay_body["cascade_rows"]
+    ] == [(row.label, row.escalated, row.passed) for row in cascade.rows]
+
+    report = compare_runs(small, big)
+    assert compare_body["compared"] == report.compared
+    for group in ("both_passed", "only_a_passed", "only_b_passed", "both_not_passed"):
+        expected = getattr(report, group)
+        assert (compare_body[group]["count"], compare_body[group]["hard"]) == (
+            expected.count,
+            expected.hard,
+        )
+    assert [item["id"] for item in compare_body["only_b_passed_questions"]] == [
+        pair.a.id for pair in report.only_b_passed.pairs
+    ]
+    for response in bad:
+        assert response.status_code == 400
+        assert response.json()["error"]["type"] == "unknown_file"
+
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "eval_a.json").write_text(small.model_dump_json(), encoding="utf-8")
+    moved = small.model_copy(update={"eval_set_path": "eval/other_set.jsonl"})
+    (other / "eval_b.json").write_text(moved.model_dump_json(), encoding="utf-8")
+    other_service = ExperimentsService(str(other), routing_config)
+    async with app_client(get_experiments_service, other_service) as client:
+        mismatch = await client.get(
+            "/api/experiments/compare", params={"a": "eval_a.json", "b": "eval_b.json"}
+        )
+    assert mismatch.status_code == 400
+    assert mismatch.json()["error"]["type"] == "runs_not_comparable"
+
+
+async def wait_for_demo_state(client: httpx.AsyncClient, wanted: str) -> dict[str, Any]:
+    """Poll the demo status until it reaches a state (fails after about 3 seconds)."""
+    for _ in range(60):
+        status = (await client.get("/api/demo/status")).json()
+        if status["state"] == wanted:
+            return status
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"demo never reached {wanted}: {status}")
+
+
+async def test_demo_service_runs_stops_and_refuses(tmp_path: Path) -> None:
+    """Demo runs go through ChatService, can be stopped, and are refused outside fake setups."""
+    questions_dir = tmp_path / "config"
+    questions_dir.mkdir()
+    (questions_dir / "load_questions.txt").write_text("What is 2+2?\n\nName a colour.\n")
+    repository = InMemoryRequestRepository()
+    routing_config = load_routing_config(str(ROUTING_CONFIG_PATH))
+    chat = ChatService(
+        provider=FakeProvider(),
+        registry=ModelRegistry(MODELS_CONFIG_PATH),
+        repository=repository,
+        router=build_rule_router(routing_config),
+        routing_config=routing_config,
+        default_model_name="big",
+    )
+
+    def demo(schedule: list[float], mode: str = "fake", database: str = "fake.db") -> DemoService:
+        """Build a demo service with a fixed schedule."""
+        return DemoService(
+            chat,
+            ["small", "big"],
+            mode,
+            database,
+            str(questions_dir),
+            schedule_builder=lambda scenario, seed: list(schedule),
+        )
+
+    async with app_client(get_demo_service, demo([0.0, 0.05, 0.1, 0.15, 0.2])) as client:
+        started = await client.post("/api/demo/start", json={"scenario": "smoke"})
+        busy = await client.post("/api/demo/start", json={"scenario": "smoke"})
+        finished = await wait_for_demo_state(client, "finished")
+        bad_scenario = await client.post("/api/demo/start", json={"scenario": "burst"})
+        bad_model = await client.post(
+            "/api/demo/start", json={"scenario": "smoke", "model": "huge"}
+        )
+        bad_files = [
+            await client.post("/api/demo/start", json={"scenario": "smoke", "questions_file": name})
+            for name in ("../load_questions.txt", "load_questions_missing.txt")
+        ]
+    assert (started.status_code, started.json()["state"], started.json()["planned"]) == (
+        200,
+        "running",
+        5,
+    )
+    assert (busy.status_code, busy.json()["error"]["type"]) == (409, "demo_busy")
+    assert (finished["planned"], finished["sent"], finished["completed"], finished["ok"]) == (
+        5,
+        5,
+        5,
+        5,
+    )
+    assert len(repository.records) == 5
+    assert bad_scenario.status_code == 422
+    assert (bad_model.status_code, bad_model.json()["error"]["type"]) == (400, "unknown_model")
+    assert all(
+        (response.status_code, response.json()["error"]["type"]) == (400, "unknown_file")
+        for response in bad_files
+    )
+
+    async with app_client(get_demo_service, demo([0.0, 0.05, 2.0, 4.0])) as client:
+        await client.post("/api/demo/start", json={"scenario": "spike", "model": "small"})
+        await asyncio.sleep(0.2)
+        stopped = (await client.post("/api/demo/stop")).json()
+        records_after_stop = len(repository.records)
+        await asyncio.sleep(0.3)
+    assert (stopped["state"], stopped["sent"]) == ("stopped", 2)
+    assert len(repository.records) == records_after_stop
+
+    for service, words in (
+        (demo([0.0], mode="real"), "not in fake mode"),
+        (demo([0.0], database="gateway.db"), "must contain 'fake'"),
+    ):
+        async with app_client(get_demo_service, service) as client:
+            refused = await client.post("/api/demo/start", json={"scenario": "smoke"})
+            status = await client.get("/api/demo/status")
+        assert (refused.status_code, refused.json()["error"]["type"]) == (409, "demo_unavailable")
+        assert words in refused.json()["error"]["message"]
+        assert status.status_code == 200
+        assert status.json()["available"] is False and words in status.json()["reason"]
+
+    async with app_client(get_demo_service, demo([0.0] * 1001)) as client:
+        too_many = await client.post("/api/demo/start", json={"scenario": "spike"})
+    assert (too_many.status_code, too_many.json()["error"]["type"]) == (400, "too_many_requests")
+
+
+async def test_gateway_and_experiments_pages(tmp_path: Path) -> None:
+    """Both new pages and their assets are served, with the four-link navigation."""
+    async with dashboard_client(tmp_path) as client:
+        pages = [await client.get(path) for path in ("/gateway", "/experiments")]
+        asset_paths = (
+            "/gateway/assets/gateway.js",
+            "/gateway/assets/gateway.css",
+            "/experiments/assets/experiments.js",
+            "/experiments/assets/experiments.css",
+        )
+        assets = [await client.get(path) for path in asset_paths]
+    for page in pages:
+        assert page.status_code == 200
+        assert page.headers["content-type"].startswith("text/html")
+        assert '<nav id="site-nav">' in page.text
+    assert [asset.status_code for asset in assets] == [200, 200, 200, 200]
+    nav_script = (STATIC_ROOT / "shared" / "nav.js").read_text(encoding="utf-8")
+    for path in ('"/chat"', '"/dashboard"', '"/gateway"', '"/experiments"'):
+        assert path in nav_script, path
     assert_static_files_are_safe()

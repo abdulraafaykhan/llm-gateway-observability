@@ -174,11 +174,23 @@ Use a file name that contains "fake" for simulated runs, so the page shows the "
 
 The Insights section at the bottom has four panels: failures by type (empty answer, rate limit, timeout, auth, other) with what they cost, the routing split for `auto` and explicit requests with fallback rescues, a latency spread histogram per model, and the 10 slowest answered requests.
 
-A comparison page, a Gateway page, an experiments page and warnings come in a later part.
+Warnings come in a later part.
+
+## Gateway and Experiments pages
+
+The navigation on every page links Chat, Observability, Gateway and Experiments.
+
+- **Gateway** (`/gateway`): the configured models with prices and live health from every attempt in the last 15 minutes, hour or 24 hours ("Healthy", "Degraded" at 10% errors or any rate-limit error, or "No recent traffic"). It also lists the non-secret settings and routing rules (read-only), and has a route preview that only runs the rules, without calling a model or recording anything.
+- **Demo traffic** (on the Gateway page): it starts a smoke, normal or spike scenario inside the gateway, through the same router, fallback and recording as real requests, and shows progress with a Stop button. It only works when the gateway is in fake mode and its database file name contains "fake". Start it like this:
+
+      $env:PROVIDER_MODE="fake"; $env:DATABASE_PATH="data/fake.db"; uv run uvicorn app.main:app
+
+- **Experiments** (`/experiments`): it lists the saved `eval_*.json` runs in `RESULTS_DIR` and plots quality against cost. For a chosen pair of runs it shows the router and cascade replay tables (the same numbers as the command-line tools) and compares two runs. It never writes anything.
+- **Settings:** `RESULTS_DIR` (default `results`) is where saved eval runs are read from. `LOAD_QUESTIONS_DIR` (default `config`) is where the demo's `load_questions*.txt` files are read from.
 
 ## Chat page
 
-Open http://127.0.0.1:8000/chat (the site root redirects there). Pick a model or `auto`, and send messages; the whole conversation is sent with each new message. The Inspector shows how the selected answer was handled: the model, the route reason, fallback, tokens, latency and cost. "Compare two models" sends each question on its own, without earlier messages, to two models at once and shows the answers side by side. Requests made here are recorded in the database like any other request. A navigation bar on every page links Chat and Observability and shows the gateway mode.
+Open http://127.0.0.1:8000/chat (the site root redirects there). Pick a model or `auto`, and send messages; the whole conversation is sent with each new message. The Inspector shows how the selected answer was handled: the model, the route reason, fallback, tokens, latency and cost. "Compare two models" sends each question on its own, without earlier messages, to two models at once and shows the answers side by side. Requests made here are recorded in the database like any other request. A navigation bar on every page shows the gateway mode.
 
 - **Attempts:** the Inspector and the dashboard's expanded rows list every attempt (for example small failed, then big answered) with its own tokens, time and cost, plus a total.
 - **Concise answers** (on by default) puts this system message first in every request from the chat page: "Answer in plain text. Be brief unless I ask for detail. Do not use tables or LaTeX." It only affects the chat page. The database does not record whether it was on, so token and cost numbers from chats with it on and off are not comparable.
@@ -215,6 +227,7 @@ Settings are read from `.env` (copied from `.env.example`):
 | `FAKE_CONFIG_PATH`, `FAKE_SEED` | Fake-mode profiles and the random seed. |
 | `ROUTING_CONFIG_PATH` | Path to `config\routing.toml`. |
 | `DASHBOARD_DATA_DIR` | Folder whose `.db` files the dashboard can read. |
+| `RESULTS_DIR`, `LOAD_QUESTIONS_DIR` | Folders the Experiments page and the demo controls read from. |
 
 - `config\models.toml` holds one table per model (`small`, `big`): the provider, the provider's model id, and the input and output price per million tokens. The prices were taken from Groq's public pricing page: small $0.075 input and $0.30 output, big $0.15 input and $0.60 output.
 - `config\routing.toml` holds the router settings: which models count as small and big, the score threshold, the fallback model, and the settings for each scoring rule (question length, keywords, how many numbers, how many question marks).
@@ -241,7 +254,7 @@ app/
   repositories/   storage: the SQLite request log behind an interface
   routing/        the router interface, scoring rules and rule router
   services/       logic: chat, routing config, stats, eval, replays
-  static/         the chat and dashboard pages and the shared navigation (plain HTML, CSS, JS)
+  static/         the chat, dashboard, gateway and experiments pages and shared navigation
   views/          response shapes for the API and the text reports
 config/           models, routing rules, fake-mode profiles, load questions
 eval/             the two labelled question sets
@@ -271,6 +284,6 @@ The app follows a model-view-controller layout with a service layer: models are 
 ## Roadmap (not built yet)
 
 - Exact-match cache, then a semantic cache.
-- Quality and speed warnings, a comparison page, a Gateway page and an experiments page.
+- Quality and speed warnings.
 - An assistant that answers questions about the project.
 - Rate-limit simulation in fake mode.

@@ -1,0 +1,128 @@
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --text: #1b1f24;
+  --muted: #4f5866;
+  --border: #d5d9e0;
+  --grid: #e3e6eb;
+  --accent: #1f5fbf;
+  --on-accent: #ffffff;
+  --focus: #1f5fbf;
+  --point: #2a6fdb;
+  --replay: #d9822b;
+  --error: #b0281a;
+  --error-bg: #fbe9e7;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171c;
+    --panel: #1d2128;
+    --text: #e8eaee;
+    --muted: #b3bac6;
+    --border: #3a414d;
+    --grid: #2c323c;
+    --accent: #7fb0ff;
+    --on-accent: #14171c;
+    --focus: #9cc2ff;
+    --point: #6ea2ff;
+    --replay: #f0a55a;
+    --error: #ff8a7d;
+    --error-bg: #3a1d1a;
+  }
+}
+
+* { box-sizing: border-box; }
+
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+h1 { font-size: 1.4rem; margin: 0 0 0.75rem; }
+h2 { font-size: 1.15rem; margin: 0 0 0.5rem; }
+h3 { font-size: 1rem; margin: 1rem 0 0.4rem; }
+
+.page { max-width: 1400px; margin: 0 auto; padding: 1rem; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  min-width: 0;
+}
+
+.panel-head { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; justify-content: space-between; }
+.controls, .pair-form { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; margin-bottom: 0.75rem; }
+.control { display: flex; gap: 0.4rem; align-items: center; min-width: 0; }
+
+button, select {
+  font: inherit;
+  font-size: 15px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.7rem;
+  cursor: pointer;
+  max-width: 100%;
+}
+
+input[type="checkbox"] { width: 1.1rem; height: 1.1rem; margin: 0; }
+.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+.muted { color: var(--muted); font-size: 14px; }
+.empty { color: var(--muted); padding: 0.5rem 0; }
+
+.error {
+  background: var(--error-bg);
+  color: var(--error);
+  border: 2px solid var(--error);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--border); white-space: nowrap; vertical-align: top; }
+thead th { color: var(--muted); font-weight: 600; }
+td.wrap { white-space: normal; min-width: 16rem; overflow-wrap: anywhere; }
+
+.chart { width: 100%; height: auto; display: block; max-width: 900px; }
+.chart .grid { stroke: var(--grid); stroke-width: 1; }
+.chart text { fill: var(--text); font-size: 12px; }
+.chart .axis-label { fill: var(--muted); }
+.chart .axis-title { font-size: 13px; font-weight: 600; }
+.chart .filled { fill: var(--point); stroke: var(--point); stroke-width: 2; }
+.chart .hollow { fill: none; stroke: var(--replay); stroke-width: 2; }
+.chart .point-label { font-size: 12px; }
+.chart .hollow-label { fill: var(--muted); }
+
+.legend { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; color: var(--muted); font-size: 14px; }
+.legend-filled, .legend-hollow { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 50%; }
+.legend-filled { background: var(--point); }
+.legend-hollow { border: 2px solid var(--replay); }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(170px, 100%), 1fr)); gap: 0.6rem; margin: 0.5rem 0; }
+.card { border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem; }
+.card-label { color: var(--muted); font-size: 14px; }
+.card-value { font-size: 1.35rem; font-weight: 700; }
+.card-note { color: var(--muted); font-size: 14px; }
+
+@media (max-width: 600px) {
+  .page { padding: 0.5rem; }
+  .panel { padding: 0.75rem; }
+  .control { flex-wrap: wrap; }
+}

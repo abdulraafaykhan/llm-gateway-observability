@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM Gateway: Experiments</title>
+  <link rel="stylesheet" href="/shared/nav.css">
+  <link rel="stylesheet" href="/experiments/assets/experiments.css">
+</head>
+<body>
+  <nav id="site-nav"></nav>
+
+  <main class="page">
+    <h1>Experiments</h1>
+    <div class="controls">
+      <label class="control">
+        <span>Split</span>
+        <select id="split">
+          <option value="all">all</option>
+          <option value="tune">tune</option>
+          <option value="test">test</option>
+        </select>
+      </label>
+      <label class="control">
+        <span>Eval set</span>
+        <select id="eval-set"></select>
+      </label>
+      <span id="status" class="muted" aria-live="polite">Loading...</span>
+    </div>
+    <p id="error" class="error" role="alert" hidden></p>
+    <p id="no-runs" class="empty" hidden>No eval runs found in the results folder. Run the eval command first.</p>
+
+    <div id="content">
+      <section class="panel" aria-labelledby="runs-title">
+        <h2 id="runs-title">Saved runs</h2>
+        <div class="table-wrap">
+          <table id="table-runs">
+            <thead>
+              <tr>
+                <th scope="col">File</th><th scope="col">Label</th><th scope="col">Model asked</th>
+                <th scope="col">Created</th><th scope="col">Questions</th><th scope="col">Passed</th>
+                <th scope="col">Score</th><th scope="col">Errors</th><th scope="col">Cut off</th>
+                <th scope="col">Cost</th><th scope="col">p95</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p id="skipped" class="muted" hidden></p>
+      </section>
+
+      <section class="panel" aria-labelledby="chart-title">
+        <div class="panel-head">
+          <h2 id="chart-title">Quality vs cost</h2>
+          <label class="control">
+            <input type="checkbox" id="zoom">
+            <span>Zoom y axis</span>
+          </label>
+        </div>
+        <p class="muted">Filled circles are measured runs. Hollow circles are offline replay settings of the pair chosen under Replay.</p>
+        <div id="chart" class="chart-box"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="replay-title">
+        <h2 id="replay-title">Replay</h2>
+        <p class="muted">Offline replay of saved runs. No model calls.</p>
+        <p id="replay-empty" class="empty" hidden>Save at least two runs of the same eval set to use this.</p>
+        <form id="replay-form" class="pair-form">
+          <label class="control"><span>Small run</span><select id="replay-small"></select></label>
+          <label class="control"><span>Big run</span><select id="replay-big"></select></label>
+          <button type="submit" class="primary">Show</button>
+        </form>
+        <div id="replay-result"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="compare-title">
+        <h2 id="compare-title">Compare two runs</h2>
+        <form id="compare-form" class="pair-form">
+          <label class="control"><span>Run A</span><select id="compare-a"></select></label>
+          <label class="control"><span>Run B</span><select id="compare-b"></select></label>
+          <button type="submit" class="primary">Compare</button>
+        </form>
+        <div id="compare-result"></div>
+      </section>
+    </div>
+  </main>
+
+  <script src="/shared/nav.js" defer></script>
+  <script src="/experiments/assets/experiments.js" defer></script>
+</body>
+</html>

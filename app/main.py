@@ -1,7 +1,7 @@
 """FastAPI application factory."""
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -11,6 +11,9 @@ from app.config import get_settings
 from app.controllers import (
     chat_controller,
     dashboard_controller,
+    demo_controller,
+    experiments_controller,
+    gateway_controller,
     health_controller,
     request_log_controller,
 )
@@ -20,9 +23,16 @@ from app.dependencies import (
     get_request_repository,
     get_router,
     get_routing_config,
+    stop_running_demo,
 )
 from app.providers.base import ProviderError
 from app.services.dashboard_service import NoDataError, UnknownSourceError
+from app.services.demo_service import (
+    DemoBusyError,
+    DemoUnavailableError,
+    TooManyDemoRequestsError,
+)
+from app.services.experiments_service import RunsNotComparableError, UnknownFileError
 from app.services.model_registry import UnknownModelError
 from app.services.routing_config import validate_routing_models
 from app.views.error_view import ErrorDetail, ErrorResponse
@@ -56,6 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await get_request_repository().initialize()
     logger.info("Request log database ready: %s", settings.database_path)
     yield
+    await stop_running_demo()
 
 
 def error_response(status_code: int, error_type: str, message: str) -> JSONResponse:
@@ -84,6 +95,28 @@ async def handle_no_data(request: Request, error: NoDataError) -> JSONResponse:
     return error_response(404, "no_data", str(error))
 
 
+# Errors from the Gateway, Experiments, and demo services: (class, HTTP status, error type).
+ERROR_TYPES: tuple[tuple[type[Exception], int, str], ...] = (
+    (UnknownFileError, 400, "unknown_file"),
+    (RunsNotComparableError, 400, "runs_not_comparable"),
+    (TooManyDemoRequestsError, 400, "too_many_requests"),
+    (DemoUnavailableError, 409, "demo_unavailable"),
+    (DemoBusyError, 409, "demo_busy"),
+)
+
+
+def simple_handler(
+    status_code: int, error_type: str
+) -> Callable[[Request, Exception], Awaitable[JSONResponse]]:
+    """Build a handler that returns the error's message in the ErrorResponse shape."""
+
+    async def handle(request: Request, error: Exception) -> JSONResponse:
+        """Return the fixed status and error type with the error's message."""
+        return error_response(status_code, error_type, str(error))
+
+    return handle
+
+
 def create_app() -> FastAPI:
     """Create the FastAPI app with routers and exception handlers."""
     app = FastAPI(title="LLM Gateway", lifespan=lifespan)
@@ -91,10 +124,15 @@ def create_app() -> FastAPI:
     app.include_router(health_controller.router)
     app.include_router(request_log_controller.router)
     app.include_router(dashboard_controller.router)
+    app.include_router(gateway_controller.router)
+    app.include_router(experiments_controller.router)
+    app.include_router(demo_controller.router)
     app.add_exception_handler(UnknownModelError, handle_unknown_model)
     app.add_exception_handler(ProviderError, handle_provider_error)
     app.add_exception_handler(UnknownSourceError, handle_unknown_source)
     app.add_exception_handler(NoDataError, handle_no_data)
+    for error_class, status_code, error_type in ERROR_TYPES:
+        app.add_exception_handler(error_class, simple_handler(status_code, error_type))
     return app
 
 

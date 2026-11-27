@@ -5,6 +5,8 @@
   const LINKS = [
     ["Chat", "/chat"],
     ["Observability", "/dashboard"],
+    ["Gateway", "/gateway"],
+    ["Experiments", "/experiments"],
   ];
 
   function isCurrent(href) {
