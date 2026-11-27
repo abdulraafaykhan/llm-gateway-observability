@@ -110,6 +110,15 @@ td.wrap { white-space: normal; min-width: 16rem; overflow-wrap: anywhere; }
 .chart .point-label { font-size: 12px; }
 .chart .hollow-label { fill: var(--muted); }
 
+.replay-points {
+  columns: 16rem auto;
+  column-gap: 1.5rem;
+  margin: 0.25rem 0 0;
+  padding-left: 1.2rem;
+  color: var(--muted);
+  font-size: 14px;
+}
+
 .legend { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; color: var(--muted); font-size: 14px; }
 .legend-filled, .legend-hollow { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 50%; }
 .legend-filled { background: var(--point); }

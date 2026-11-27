@@ -13,6 +13,7 @@ const state = {
   runs: [],
   skipped: [],
   replay: null,
+  replayView: null,
   replayPair: null,
   comparePair: null,
 };
@@ -170,51 +171,85 @@ function niceMax(value) {
   return 10 * power;
 }
 
+// Local HH:MM of a run's start, so two runs with the same label can be told apart.
+function localClock(iso) {
+  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
 function shortLabel(label) {
   return label.replace(/^threshold /, "thr ").replace(/^tokens > /, "tokens>");
 }
 
 function chartPoints() {
   const measured = setRuns().map((run) => ({
-    label: run.label, score: run.score_percent, cost: run.total_cost_usd, hollow: false,
+    label: `${run.label} ${localClock(run.created_at)}`, score: run.score_percent, cost: run.total_cost_usd, hollow: false,
     source: `measured run ${run.file}`,
   }));
-  if (!state.replay) return measured;
+  if (!replayMatchesView()) return measured;
   const source = `offline replay of ${state.replay.small_file} and ${state.replay.big_file}`;
   const router = state.replay.router_rows.map((row) => ({ ...row, kind: "router replay" }));
   const cascade = state.replay.cascade_rows
     .filter((row) => !BASELINE_LABELS.has(row.label))
     .map((row) => ({ ...row, kind: "cascade replay" }));
   const replayed = [...router, ...cascade].map((row) => ({
-    label: shortLabel(row.label), score: row.score_percent, cost: row.cost_usd, hollow: true,
-    source: `${row.kind}, ${source}`,
+    label: shortLabel(row.label), fullLabel: row.label, score: row.score_percent, cost: row.cost_usd,
+    hollow: true, source: `${row.kind}, ${source}`,
   }));
   return [...measured, ...replayed];
 }
 
-function yRange(points) {
-  if (!byId("zoom").checked || !points.length) return [0, 100];
+// Round y ticks: a step of 1, 2, 5, or 10 (20 or 25 if needed) giving 4 to 6 ticks.
+function yTicks(points) {
+  if (!byId("zoom").checked || !points.length) return { min: 0, max: 100, step: 20 };
   const scores = points.map((point) => point.score);
-  return [Math.max(0, Math.floor(Math.min(...scores) - 5)), Math.min(100, Math.ceil(Math.max(...scores) + 5))];
+  const low = Math.max(0, Math.min(...scores) - 5);
+  const high = Math.min(100, Math.max(...scores) + 5);
+  for (const step of [1, 2, 5, 10, 20, 25]) {
+    const min = Math.max(0, Math.floor(low / step) * step);
+    const max = Math.min(100, Math.ceil(high / step) * step);
+    const count = Math.round((max - min) / step) + 1;
+    if (count >= 4 && count <= 6) return { min, max, step };
+    if (count < 4) return { min, max: Math.min(100, min + 3 * step), step };
+  }
+  return { min: 0, max: 100, step: 20 };
 }
 
-function drawAxes(root, xMax, yMin, yMax) {
+function drawAxes(root, xMax, ticks) {
   const plotW = CHART.width - CHART.left - CHART.right;
   const plotH = CHART.height - CHART.top - CHART.bottom;
-  for (let step = 0; step <= 4; step += 1) {
-    const yValue = yMin + ((yMax - yMin) * step) / 4;
-    const y = CHART.top + plotH - (plotH * step) / 4;
+  const span = Math.max(ticks.max - ticks.min, 1);
+  for (let value = ticks.min; value <= ticks.max + 1e-9; value += ticks.step) {
+    const y = CHART.top + plotH - (plotH * (value - ticks.min)) / span;
     root.appendChild(svg("line", { x1: CHART.left, x2: CHART.left + plotW, y1: y, y2: y, class: "grid" }));
-    root.appendChild(svg("text", { x: CHART.left - 6, y: y + 4, "text-anchor": "end", class: "axis-label" }, [`${yValue.toFixed(0)}%`]));
+    root.appendChild(svg("text", { x: CHART.left - 6, y: y + 4, "text-anchor": "end", class: "axis-label" }, [`${value}%`]));
+  }
+  for (let step = 0; step <= 4; step += 1) {
     const x = CHART.left + (plotW * step) / 4;
     root.appendChild(svg("text", { x, y: CHART.top + plotH + 18, "text-anchor": "middle", class: "axis-label" }, [`$${((xMax * step) / 4).toFixed(4)}`]));
   }
   root.appendChild(svg("text", { x: CHART.left + plotW / 2, y: CHART.height - 8, "text-anchor": "middle", class: "axis-title" }, ["Total cost (USD)"]));
-  const yTitle = byId("zoom").checked ? `Score (%), zoomed ${yMin} to ${yMax}` : "Score (%), 0 to 100";
+  const yTitle = byId("zoom").checked ? `Score (%), zoomed ${ticks.min} to ${ticks.max}` : "Score (%), 0 to 100";
   root.appendChild(svg("text", {
     x: 14, y: CHART.top + plotH / 2, "text-anchor": "middle", class: "axis-title",
     transform: `rotate(-90 14 ${CHART.top + plotH / 2})`,
   }, [yTitle]));
+}
+
+// A rough box around a label, to avoid drawing labels on top of each other.
+function labelBox(x, y, text) {
+  return { left: x, right: x + text.length * 7, top: y - 12, bottom: y + 2 };
+}
+
+function overlaps(box, boxes) {
+  return boxes.some((other) => box.left < other.right && box.right > other.left
+    && box.top < other.bottom && box.bottom > other.top);
+}
+
+function hollowList(points) {
+  const hollow = points.filter((point) => point.hollow);
+  if (!hollow.length) return null;
+  return el("ul", { class: "replay-points", "aria-label": "Replay settings shown as hollow circles" },
+    hollow.map((point) => el("li", {}, [`${point.fullLabel}: ${point.score.toFixed(1)}%, $${point.cost.toFixed(6)}`])));
 }
 
 function renderChart() {
@@ -225,7 +260,7 @@ function renderChart() {
     return;
   }
   const xMax = niceMax(Math.max(...points.map((point) => point.cost)));
-  const [yMin, yMax] = yRange(points);
+  const ticks = yTicks(points);
   const plotW = CHART.width - CHART.left - CHART.right;
   const plotH = CHART.height - CHART.top - CHART.bottom;
   const measured = points.filter((point) => !point.hollow).length;
@@ -233,22 +268,41 @@ function renderChart() {
     + points.map((point) => `${point.label} ${point.score.toFixed(1)}% at $${point.cost.toFixed(6)}`).join(", ");
   const root = svg("svg", { viewBox: `0 0 ${CHART.width} ${CHART.height}`, role: "img", "aria-label": summary, class: "chart" });
   root.appendChild(svg("title", {}, ["Quality vs cost"]));
-  drawAxes(root, xMax, yMin, yMax);
-  for (const point of points) {
-    const x = CHART.left + (plotW * point.cost) / xMax;
-    const clamped = Math.min(Math.max(point.score, yMin), yMax);
-    const y = CHART.top + plotH - (plotH * (clamped - yMin)) / Math.max(yMax - yMin, 1);
+  drawAxes(root, xMax, ticks);
+  const placed = [];
+  const position = (point) => {
+    const clamped = Math.min(Math.max(point.score, ticks.min), ticks.max);
+    return [
+      CHART.left + (plotW * point.cost) / xMax,
+      CHART.top + plotH - (plotH * (clamped - ticks.min)) / Math.max(ticks.max - ticks.min, 1),
+    ];
+  };
+  // Hollow circles first, so the measured runs are drawn on top; then labels.
+  for (const point of [...points.filter((p) => p.hollow), ...points.filter((p) => !p.hollow)]) {
+    const [x, y] = position(point);
     const tooltip = `${point.label}: score ${point.score.toFixed(1)}%, cost $${point.cost.toFixed(6)} (${point.source})`;
     root.appendChild(svg("circle", { cx: x, cy: y, r: point.hollow ? 5 : 6, class: point.hollow ? "hollow" : "filled" }, [
       svg("title", {}, [tooltip]),
     ]));
-    root.appendChild(svg("text", { x: x + 8, y: y - 6, class: point.hollow ? "point-label hollow-label" : "point-label" }, [point.label]));
+  }
+  for (const point of points.filter((p) => !p.hollow)) {
+    const [x, y] = position(point);
+    placed.push(labelBox(x + 8, y - 6, point.label));
+    root.appendChild(svg("text", { x: x + 8, y: y - 6, class: "point-label" }, [point.label]));
+  }
+  for (const point of points.filter((p) => p.hollow && BASELINE_LABELS.has(p.label))) {
+    const [x, y] = position(point);
+    const labelY = y + 18;
+    const boxForLabel = labelBox(x + 8, labelY, point.label);
+    if (overlaps(boxForLabel, placed)) continue;
+    placed.push(boxForLabel);
+    root.appendChild(svg("text", { x: x + 8, y: labelY, class: "point-label hollow-label" }, [point.label]));
   }
   const legend = el("p", { class: "legend" }, [
     el("span", { class: "legend-filled", "aria-hidden": "true" }), "measured run   ",
-    el("span", { class: "legend-hollow", "aria-hidden": "true" }), "offline replay setting",
+    el("span", { class: "legend-hollow", "aria-hidden": "true" }), "offline replay setting (hover for details; listed below)",
   ]);
-  box.replaceChildren(root, legend);
+  box.replaceChildren(root, legend, hollowList(points) || document.createTextNode(""));
 }
 
 // ---------- replay ----------
@@ -285,18 +339,44 @@ function renderReplay(result) {
   );
 }
 
+const currentView = () => ({ split: state.split, evalSet: state.evalSet });
+const sameView = (view) => Boolean(view) && view.split === state.split && view.evalSet === state.evalSet;
+
+// Replay points are only drawn for a result requested with the current split and eval set,
+// and only when both of its files belong to that eval set.
+function replayMatchesView() {
+  return Boolean(state.replay) && sameView(state.replayView)
+    && inSet([state.replay.small_file, state.replay.big_file]);
+}
+
 async function loadReplay(small, big) {
+  const view = currentView();
   state.replayPair = [small, big];
+  state.replay = null;
   byId("replay-result").replaceChildren(el("p", { class: "muted" }, ["Loading..."]));
+  renderChart();
   try {
-    state.replay = await api(`/api/experiments/replay?${query({ small, big })}`);
+    const result = await api(`/api/experiments/replay?${query({ small, big })}`);
+    if (!sameView(view)) return;
+    state.replay = result;
+    state.replayView = view;
     showError("");
-    renderReplay(state.replay);
+    renderReplay(result);
   } catch (error) {
-    state.replay = null;
+    if (!sameView(view)) return;
     byId("replay-result").replaceChildren(el("p", { class: "error" }, [error.message]));
   }
   renderChart();
+}
+
+// Called when the split or eval set changes: old replay and comparison results no longer apply.
+function clearPairs() {
+  state.replay = null;
+  state.replayView = null;
+  state.replayPair = null;
+  state.comparePair = null;
+  byId("replay-result").replaceChildren();
+  byId("compare-result").replaceChildren();
 }
 
 // ---------- compare ----------
@@ -332,12 +412,16 @@ function renderCompare(result) {
 }
 
 async function loadCompare(a, b) {
+  const view = currentView();
   state.comparePair = [a, b];
   byId("compare-result").replaceChildren(el("p", { class: "muted" }, ["Loading..."]));
   try {
-    renderCompare(await api(`/api/experiments/compare?${query({ a, b })}`));
+    const result = await api(`/api/experiments/compare?${query({ a, b })}`);
+    if (!sameView(view)) return;
+    renderCompare(result);
     showError("");
   } catch (error) {
+    if (!sameView(view)) return;
     byId("compare-result").replaceChildren(el("p", { class: "error" }, [error.message]));
   }
 }
@@ -347,16 +431,6 @@ async function loadCompare(a, b) {
 function inSet(files) {
   const names = new Set(setRuns().map((run) => run.file));
   return files && files.every((file) => names.has(file));
-}
-
-async function refreshPairs() {
-  if (state.replayPair && inSet(state.replayPair)) await loadReplay(...state.replayPair);
-  else {
-    state.replay = null;
-    byId("replay-result").replaceChildren();
-  }
-  if (state.comparePair && inSet(state.comparePair)) await loadCompare(...state.comparePair);
-  else byId("compare-result").replaceChildren();
 }
 
 function renderAll() {
@@ -387,13 +461,13 @@ async function loadRuns() {
 function wireControls() {
   byId("split").addEventListener("change", async (event) => {
     state.split = event.target.value;
+    clearPairs();
     await loadRuns();
-    await refreshPairs();
   });
-  byId("eval-set").addEventListener("change", async (event) => {
+  byId("eval-set").addEventListener("change", (event) => {
     state.evalSet = event.target.value;
+    clearPairs();
     renderAll();
-    await refreshPairs();
   });
   byId("zoom").addEventListener("change", renderChart);
   byId("replay-form").addEventListener("submit", (event) => {
