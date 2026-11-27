@@ -12,17 +12,17 @@ output_price_per_million_tokens = 0.60
 
 # Copy a block, remove the # signs, fill in the real model_id from the list command and the prices from Google's pricing page. Use the paid-tier list price even while on the free tier, so costs are comparable. The model name (the part after models.) can be any new name; do not rename small or big.
 
-# [models.gem-lite]
-# provider = "gemini"
-# model_id = "FILL_IN"
-# input_price_per_million_tokens = 0.0
-# output_price_per_million_tokens = 0.0
+[models.gem-lite]      # gemini-3.5-flash-lite
+provider = "gemini"
+model_id = "gemini-3.5-flash-lite"
+input_price_per_million_tokens = 0.30
+output_price_per_million_tokens = 2.50
 
-# [models.gem-flash]
-# provider = "gemini"
-# model_id = "FILL_IN"
-# input_price_per_million_tokens = 0.0
-# output_price_per_million_tokens = 0.0
+[models.gem-35]        # gemini-3.5-flash
+provider = "gemini"
+model_id = "gemini-3.5-flash"
+input_price_per_million_tokens = 1.50
+output_price_per_million_tokens = 9.00
 
 # [models.small-low]
 # provider = "groq"
