@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 
-from app.cli.load_test_cli import fetch_mode
+from app.cli.load_test_cli import fetch_health, unknown_model_problem
 from app.cli.stats_cli import positive_int
 from app.clients.gateway_client import HttpGatewayClient
 from app.models.eval import EvalQuestion, EvalRunResult
@@ -75,9 +75,14 @@ async def run_eval(args: argparse.Namespace, questions: list[EvalQuestion]) -> i
     """Check the gateway, run the questions, save, and print the summary."""
     limits = httpx.Limits(max_connections=MAX_CONNECTIONS)
     async with httpx.AsyncClient(base_url=args.base_url, limits=limits) as http_client:
-        mode = await fetch_mode(http_client)
-        if mode is None:
+        health = await fetch_health(http_client)
+        if health is None:
             print(f"Gateway not reachable at {args.base_url}", file=sys.stderr)
+            return 1
+        mode, known_names = health
+        model_problem = unknown_model_problem(args.model, known_names)
+        if model_problem is not None:
+            print(model_problem, file=sys.stderr)
             return 1
         if mode == "fake":
             print(

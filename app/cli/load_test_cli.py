@@ -51,14 +51,27 @@ def build_body(question: str, model: str | None) -> dict[str, Any]:
     return body
 
 
-async def fetch_mode(client: httpx.AsyncClient) -> str | None:
-    """Return the gateway's provider mode from /health, or None if it is not reachable."""
+async def fetch_health(client: httpx.AsyncClient) -> tuple[str, list[str]] | None:
+    """Return the gateway's provider mode and model names from /health, or None if unreachable."""
     try:
         response = await client.get("/health")
         response.raise_for_status()
-        return str(response.json().get("mode"))
-    except (httpx.HTTPError, ValueError):
+        body = response.json()
+        models = body.get("models")
+        names = [str(name) for name in models] if isinstance(models, list) else []
+        return str(body.get("mode")), names
+    except (httpx.HTTPError, ValueError, AttributeError):
         return None
+
+
+def unknown_model_problem(model: str | None, known_names: list[str]) -> str | None:
+    """Return the unknown-model message when the gateway does not know this model, else None."""
+    if model is None or model == "auto" or model in known_names:
+        return None
+    return (
+        f"Unknown model '{model}'. The gateway knows: {', '.join(known_names)}. "
+        "Restart the gateway if you just edited config/models.toml."
+    )
 
 
 async def send_one(client: httpx.AsyncClient, body: dict[str, Any]) -> str:
@@ -108,10 +121,14 @@ def print_summary(outcomes: list[str], wall_seconds: float) -> None:
     )
 
 
-def startup_problem(mode: str | None, args: argparse.Namespace) -> str | None:
+def startup_problem(health: tuple[str, list[str]] | None, args: argparse.Namespace) -> str | None:
     """Return the reason the run must not start, or None when it can go ahead."""
-    if mode is None:
+    if health is None:
         return f"Gateway not reachable at {args.base_url}"
+    mode, known_names = health
+    model_problem = unknown_model_problem(args.model, known_names)
+    if model_problem is not None:
+        return model_problem
     if mode == "real" and args.scenario != "smoke" and not args.allow_real:
         return (
             f"Refusing to run '{args.scenario}' against a real-mode gateway: it would hit "
@@ -128,11 +145,12 @@ async def run(args: argparse.Namespace) -> int:
     async with httpx.AsyncClient(
         base_url=args.base_url, timeout=REQUEST_TIMEOUT_SECONDS, limits=limits
     ) as client:
-        mode = await fetch_mode(client)
-        problem = startup_problem(mode, args)
+        health = await fetch_health(client)
+        problem = startup_problem(health, args)
         if problem is not None:
             print(problem, file=sys.stderr)
             return 1
+        mode = health[0] if health is not None else None
         schedule = build_schedule(args.scenario, args.seed)
         questions = load_questions(Path(args.questions))
         print(f"scenario: {args.scenario} | planned requests: {len(schedule)} | mode: {mode}")
