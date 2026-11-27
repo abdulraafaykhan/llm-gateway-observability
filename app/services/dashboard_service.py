@@ -1,20 +1,45 @@
 """Read-only data for the dashboard: lists database files and summarizes their request logs."""
 
+import bisect
 import math
 import re
+from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from app.models.dashboard import SourceInfo, TimeBucket, TimeseriesResult
+from app.models.dashboard import (
+    FailedRequest,
+    FailureSummary,
+    InsightsResult,
+    LatencyHistogram,
+    RoutingSummary,
+    SourceInfo,
+    TimeBucket,
+    TimeseriesResult,
+)
 from app.models.request_record import RequestRecord
 from app.models.stats import StatsReport
 from app.repositories.base import RequestRepository
+from app.services.failure_types import FAILURE_TYPES, classify_failure
 from app.services.stats_service import ANSWERED_STATUSES, StatsService, percentile
 
 SOURCE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+\.db$")
 BUCKET_SIZES_SECONDS: tuple[int, ...] = (10, 30, 60, 300, 900, 3600, 21600)
 MAX_BUCKETS: int = 120
+AUTO_MODEL: str = "auto"
+INSIGHT_LIST_LIMIT: int = 10
+LATENCY_BIN_EDGES_MS: tuple[float, ...] = (500, 1000, 2000, 5000, 10000, 20000, 60000)
+LATENCY_BIN_LABELS: tuple[str, ...] = (
+    "<0.5s",
+    "0.5-1s",
+    "1-2s",
+    "2-5s",
+    "5-10s",
+    "10-20s",
+    "20-60s",
+    ">60s",
+)
 
 RepositoryFactory = Callable[[Path], RequestRepository]
 
@@ -95,6 +120,12 @@ class DashboardService:
             return TimeseriesResult(bucket_seconds=BUCKET_SIZES_SECONDS[0], buckets=[])
         times = [record_timestamp(record) for record in records]
         return build_buckets(records, min(times), max(times))
+
+    async def insights(self, source: str | None, minutes: int | None) -> InsightsResult:
+        """Return failures, routing, latency spread, and slowest requests for the range."""
+        repository = self._repository(source)
+        records = await repository.list_all(since_iso(utc_now(), minutes))
+        return build_insights(records)
 
     async def recent(
         self, source: str | None, limit: int, minutes: int | None
@@ -186,3 +217,83 @@ def make_bucket(start_seconds: int, records: list[RequestRecord]) -> TimeBucket:
         p50_ms=percentile(latencies, 50) if latencies else None,
         p95_ms=percentile(latencies, 95) if latencies else None,
     )
+
+
+def build_insights(records: list[RequestRecord]) -> InsightsResult:
+    """Compute all four insight panels from one list of rows."""
+    return InsightsResult(
+        failures=summarize_failures(records),
+        routing=summarize_routing(records),
+        latency_histogram=build_latency_histogram(records),
+        slowest=slowest_answered(records),
+    )
+
+
+def newest_first(records: list[RequestRecord]) -> list[RequestRecord]:
+    """Sort rows newest first (by created_at, then id)."""
+    return sorted(records, key=lambda record: (record.created_at, record.id or 0), reverse=True)
+
+
+def summarize_failures(records: list[RequestRecord]) -> FailureSummary:
+    """Count failed rows by type, sum what they cost, and list the most recent ones."""
+    failed = [record for record in records if record.status == "error"]
+    by_type = dict.fromkeys(FAILURE_TYPES, 0)
+    for record in failed:
+        by_type[classify_failure(record.error_message)] += 1
+    recent = [
+        FailedRequest(record=record, failure_type=classify_failure(record.error_message))
+        for record in newest_first(failed)[:INSIGHT_LIST_LIMIT]
+    ]
+    return FailureSummary(
+        by_type=by_type,
+        errors=len(failed),
+        truncated=sum(1 for record in records if record.status == "truncated"),
+        failed_cost_usd=sum(record.cost_usd for record in failed),
+        failed_input_tokens=sum(record.input_tokens for record in failed),
+        failed_output_tokens=sum(record.output_tokens for record in failed),
+        recent=recent,
+    )
+
+
+def count_by_model(records: list[RequestRecord]) -> dict[str, int]:
+    """Count rows per final model, sorted by model name."""
+    return dict(sorted(Counter(record.model_name for record in records).items()))
+
+
+def summarize_routing(records: list[RequestRecord]) -> RoutingSummary:
+    """Split "auto" and explicit requests by final model, and count fallbacks and rescues."""
+    auto = [record for record in records if record.requested_model == AUTO_MODEL]
+    explicit = [record for record in records if record.requested_model not in (AUTO_MODEL, "")]
+    fallbacks = [record for record in records if record.fallback_used]
+    return RoutingSummary(
+        auto_requests=len(auto),
+        auto_by_model=count_by_model(auto),
+        explicit_by_model=count_by_model(explicit),
+        fallbacks=len(fallbacks),
+        fallbacks_rescued=sum(1 for record in fallbacks if record.status in ANSWERED_STATUSES),
+    )
+
+
+def latency_bin(latency_ms: float) -> int:
+    """Return the histogram bin index; a value on an edge goes into the higher bin."""
+    return bisect.bisect_right(LATENCY_BIN_EDGES_MS, latency_ms)
+
+
+def build_latency_histogram(records: list[RequestRecord]) -> LatencyHistogram:
+    """Count answered rows per latency range for each model."""
+    by_model: dict[str, list[int]] = {}
+    for record in records:
+        if record.status not in ANSWERED_STATUSES:
+            continue
+        counts = by_model.setdefault(record.model_name, [0] * len(LATENCY_BIN_LABELS))
+        counts[latency_bin(record.latency_ms)] += 1
+    return LatencyHistogram(
+        bin_labels=list(LATENCY_BIN_LABELS), by_model=dict(sorted(by_model.items()))
+    )
+
+
+def slowest_answered(records: list[RequestRecord]) -> list[RequestRecord]:
+    """Return the answered rows with the highest latency, slowest first."""
+    answered = [record for record in records if record.status in ANSWERED_STATUSES]
+    answered.sort(key=lambda record: record.latency_ms, reverse=True)
+    return answered[:INSIGHT_LIST_LIMIT]

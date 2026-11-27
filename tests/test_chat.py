@@ -33,6 +33,7 @@ from app.services.eval_checker import check_answer
 from app.services.eval_loader import load_eval_set
 from app.services.eval_report import compare_runs, summarize
 from app.services.eval_runner import EvalRunner
+from app.services.failure_types import classify_failure
 from app.services.load_plan import build_schedule
 from app.services.model_registry import ModelRegistry
 from app.services.router_replay import replay, replay_baselines
@@ -1082,7 +1083,7 @@ def test_cascade_token_stats_and_rendering() -> None:
     assert text.count("NOTES") == 1
 
 
-DASHBOARD_STATIC_DIR = Path(__file__).resolve().parent.parent / "app" / "static" / "dashboard"
+STATIC_ROOT = Path(__file__).resolve().parent.parent / "app" / "static"
 
 
 def minutes_ago(minutes: float) -> str:
@@ -1216,12 +1217,15 @@ async def test_dashboard_requests_page_and_static_files(tmp_path: Path) -> None:
     assert items[0]["route_reason"] == "score 0 (threshold 2): no rules matched"
     assert page.status_code == 200 and page.headers["content-type"].startswith("text/html")
     assert script.status_code == 200 and styles.status_code == 200
-    for path in DASHBOARD_STATIC_DIR.iterdir():
-        text = path.read_text(encoding="utf-8").replace("http://www.w3.org/2000/svg", "")
-        assert "http://" not in text and "https://" not in text, path.name
-    script_text = (DASHBOARD_STATIC_DIR / "dashboard.js").read_text(encoding="utf-8")
-    for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
-        assert forbidden not in script_text, forbidden
+    static_files = [path for path in STATIC_ROOT.rglob("*") if path.is_file()]
+    assert len(static_files) >= 7
+    for path in static_files:
+        text = path.read_text(encoding="utf-8")
+        without_namespace = text.replace("http://www.w3.org/2000/svg", "")
+        assert "http://" not in without_namespace, path.name
+        assert "https://" not in without_namespace, path.name
+        for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+            assert forbidden not in text, (path.name, forbidden)
 
 
 async def table_snapshot(path: Path) -> tuple[int, list[str]]:
@@ -1250,3 +1254,174 @@ async def test_dashboard_never_writes(tmp_path: Path) -> None:
         ).status_code == 200
     assert await table_snapshot(database_path) == before
     assert sorted(path.name for path in tmp_path.glob("*.db")) == files_before
+
+
+def test_classify_failure_types() -> None:
+    """Error messages map to failure types in a fixed order, ignoring case."""
+    empty = "Groq returned an empty answer (finish_reason=length, output_tokens=4096)"
+    assert classify_failure(empty) == "empty_answer"
+    for message in (
+        "Rate limit reached for model",
+        "Groq API error (HTTP 429)",
+        "too many requests",
+    ):
+        assert classify_failure(message) == "rate_limit", message
+    assert classify_failure("Request timed out") == "timeout"
+    assert classify_failure("Invalid API key") == "auth"
+    assert classify_failure("401 Unauthorized") == "auth"
+    assert classify_failure(None) == "other"
+    assert classify_failure("Could not connect to Groq") == "other"
+    assert classify_failure("RATE LIMIT REACHED") == "rate_limit"
+    assert classify_failure("groq returned an EMPTY ANSWER") == "empty_answer"
+
+
+async def test_dashboard_insights_panels(tmp_path: Path) -> None:
+    """Insights classify failures, split routing, bin latencies, and list the slowest rows."""
+
+    def answered(age: float, latency: float, **changes: Any) -> RequestRecord:
+        """Build an answered row created `age` minutes ago."""
+        return make_record(created_at=minutes_ago(age), latency_ms=latency, **changes)
+
+    def failed(age: float, message: str, **changes: Any) -> RequestRecord:
+        """Build a failed row created `age` minutes ago."""
+        fields: dict[str, Any] = {
+            "status": "error",
+            "answer": None,
+            "error_type": "provider_error",
+            "error_message": message,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.0,
+        }
+        fields.update(changes)
+        return make_record(created_at=minutes_ago(age), **fields)
+
+    empty_answer = "Groq returned an empty answer (finish_reason=length, output_tokens=4096)"
+    records = [
+        failed(
+            1,
+            empty_answer,
+            question="e1",
+            requested_model="auto",
+            fallback_used=True,
+            input_tokens=50,
+            output_tokens=4096,
+            cost_usd=0.0025,
+        ),
+        answered(2, 400.0, requested_model="auto"),
+        answered(3, 1000.0, model_name="small", requested_model="auto"),
+        answered(4, 2500.0, model_name="small", status="truncated", requested_model="small"),
+        answered(5, 6000.0, requested_model="auto", fallback_used=True),
+        answered(6, 70000.0),
+        answered(7, 15000.0, requested_model="big"),
+        failed(
+            8,
+            "Groq API error (HTTP 429): Rate limit reached",
+            question="e2",
+            model_name="small",
+            requested_model="auto",
+        ),
+        failed(9, "Request timed out after 30 seconds", question="e3"),
+        *(
+            failed(
+                10 + index,
+                "Groq API error (HTTP 401): Invalid API Key",
+                question=f"auth{index}",
+                model_name="small",
+                requested_model="small",
+                input_tokens=5,
+            )
+            for index in range(10)
+        ),
+        answered(300, 100.0, requested_model="big"),
+    ]
+    await make_dashboard_db(tmp_path / "gateway.db", records)
+    async with dashboard_client(tmp_path) as client:
+        body = (await client.get("/api/dashboard/insights", params={"minutes": 60})).json()
+        all_time = (await client.get("/api/dashboard/insights")).json()
+        bad = await client.get("/api/dashboard/insights", params={"source": "nope.db"})
+
+    failures = body["failures"]
+    assert failures["by_type"] == {
+        "empty_answer": 1,
+        "rate_limit": 1,
+        "timeout": 1,
+        "auth": 10,
+        "other": 0,
+    }
+    assert (failures["errors"], failures["truncated"]) == (13, 1)
+    assert failures["failed_cost_usd"] == pytest.approx(0.0025)
+    assert (failures["failed_input_tokens"], failures["failed_output_tokens"]) == (100, 4096)
+    expected_recent = ["e1", "e2", "e3", *(f"auth{index}" for index in range(7))]
+    assert [item["question"] for item in failures["recent"]] == expected_recent
+    assert failures["recent"][0]["failure_type"] == "empty_answer"
+
+    routing = body["routing"]
+    assert routing["auto_requests"] == 5
+    assert routing["auto_by_model"] == {"big": 3, "small": 2}
+    assert routing["explicit_by_model"] == {"big": 1, "small": 11}
+    assert (routing["fallbacks"], routing["fallbacks_rescued"]) == (2, 1)
+
+    histogram = body["latency_histogram"]
+    assert histogram["bin_labels"] == [
+        "<0.5s",
+        "0.5-1s",
+        "1-2s",
+        "2-5s",
+        "5-10s",
+        "10-20s",
+        "20-60s",
+        ">60s",
+    ]
+    assert histogram["by_model"] == {
+        "big": [1, 0, 0, 0, 1, 1, 0, 1],
+        "small": [0, 0, 1, 1, 0, 0, 0, 0],
+    }
+    assert sum(sum(counts) for counts in histogram["by_model"].values()) == 6
+
+    slowest = [item["latency_ms"] for item in body["slowest"]]
+    assert slowest == [70000.0, 15000.0, 6000.0, 2500.0, 1000.0, 400.0]
+    assert len(all_time["slowest"]) == 7 and len(all_time["slowest"]) <= 10
+    assert all_time["routing"]["explicit_by_model"] == {"big": 2, "small": 11}
+
+    assert bad.status_code == 400
+    assert bad.json()["error"]["type"] == "unknown_source"
+
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    await make_dashboard_db(empty_dir / "gateway.db", [])
+    async with dashboard_client(empty_dir) as client:
+        empty = (await client.get("/api/dashboard/insights")).json()
+    assert empty["failures"]["errors"] == 0
+    assert set(empty["failures"]["by_type"].values()) == {0}
+    assert empty["failures"]["recent"] == []
+    assert empty["routing"] == {
+        "auto_requests": 0,
+        "auto_by_model": {},
+        "explicit_by_model": {},
+        "fallbacks": 0,
+        "fallbacks_rescued": 0,
+    }
+    assert empty["latency_histogram"]["by_model"] == {}
+    assert empty["slowest"] == []
+
+
+async def test_chat_page_navigation_and_shared_files(tmp_path: Path) -> None:
+    """The chat page, the root redirect, and the shared and chat assets are served."""
+    async with dashboard_client(tmp_path) as client:
+        chat_page = await client.get("/chat")
+        root = await client.get("/")
+        dashboard_page = await client.get("/dashboard")
+        asset_paths = (
+            "/shared/nav.js",
+            "/shared/nav.css",
+            "/chat/assets/chat.js",
+            "/chat/assets/chat.css",
+        )
+        assets = [await client.get(path) for path in asset_paths]
+    assert chat_page.status_code == 200
+    assert chat_page.headers["content-type"].startswith("text/html")
+    assert (root.status_code, root.headers["location"]) == (307, "/chat")
+    assert [asset.status_code for asset in assets] == [200, 200, 200, 200]
+    for page in (chat_page, dashboard_page):
+        assert '<nav id="site-nav">' in page.text

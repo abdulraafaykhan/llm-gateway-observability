@@ -17,7 +17,7 @@ const CHART = { width: 640, height: 260, left: 64, right: 16, top: 28, bottom: 4
 
 const state = {
   source: null, range: "all", live: false, timer: null,
-  busy: false, pending: false, lastSummary: null, openIds: new Set(),
+  busy: false, pending: false, lastSummary: null, openIds: new Set(), openSlowIds: new Set(),
 };
 
 const byId = (id) => document.getElementById(id);
@@ -298,11 +298,15 @@ function renderCards(overall) {
       ["Latency p99", formatMs(latency.p99_ms)],
     ];
   }
-  byId("cards").replaceChildren(...items.map(([label, value, note]) => el("div", { class: "card" }, [
+  byId("cards").replaceChildren(...items.map(cardNode));
+}
+
+function cardNode([label, value, note]) {
+  return el("div", { class: "card" }, [
     el("div", { class: "card-label" }, [label]),
     el("div", { class: "card-value" }, [value]),
     note ? el("div", { class: "card-note" }, [note]) : null,
-  ])));
+  ]);
 }
 
 function renderCharts(summary, series) {
@@ -350,24 +354,22 @@ function detailBlock(item) {
   ]);
 }
 
-function renderRecent(items) {
+// Rows that open a detail row with the full question and answer on click or Enter.
+function renderExpandableRows(tableId, items, makeCells, openIds) {
+  const table = byId(tableId);
+  const columns = table.tHead.rows[0].cells.length;
   const rows = [];
   for (const item of items) {
-    const open = state.openIds.has(item.id);
-    const row = el("tr", { tabindex: "0", class: "clickable", "aria-expanded": String(open) }, [
-      cell(formatLocalDateTime(item.created_at)), cell(item.model_name), cell(item.requested_model || "-"),
-      cell(item.status), cell(item.route_reason || "-"), cell(item.fallback_used ? "yes" : "no"),
-      cell(formatCount(item.input_tokens)), cell(formatCount(item.output_tokens)),
-      cell(formatMs(item.latency_ms)), cell(formatMoney(item.cost_usd)),
-    ]);
-    const detail = el("tr", { class: "detail" }, [el("td", { colspan: "10" }, [detailBlock(item)])]);
+    const open = openIds.has(item.id);
+    const row = el("tr", { tabindex: "0", class: "clickable", "aria-expanded": String(open) }, makeCells(item));
+    const detail = el("tr", { class: "detail" }, [el("td", { colspan: String(columns) }, [detailBlock(item)])]);
     detail.hidden = !open;
     const toggle = () => {
       const opening = detail.hidden;
       detail.hidden = !opening;
       row.setAttribute("aria-expanded", String(opening));
-      if (opening) state.openIds.add(item.id);
-      else state.openIds.delete(item.id);
+      if (opening) openIds.add(item.id);
+      else openIds.delete(item.id);
     };
     row.addEventListener("click", toggle);
     row.addEventListener("keydown", (event) => {
@@ -378,10 +380,138 @@ function renderRecent(items) {
     });
     rows.push(row, detail);
   }
-  byId("table-recent").tBodies[0].replaceChildren(...rows);
+  table.tBodies[0].replaceChildren(...rows);
 }
 
-function render(summary, series, recent) {
+function renderRecent(items) {
+  renderExpandableRows("table-recent", items, (item) => [
+    cell(formatLocalDateTime(item.created_at)), cell(item.model_name), cell(item.requested_model || "-"),
+    cell(item.status), cell(item.route_reason || "-"), cell(item.fallback_used ? "yes" : "no"),
+    cell(formatCount(item.input_tokens)), cell(formatCount(item.output_tokens)),
+    cell(formatMs(item.latency_ms)), cell(formatMoney(item.cost_usd)),
+  ], state.openIds);
+}
+
+// ---------- insights ----------
+
+function shorten(text, max) {
+  const value = text || "";
+  return value.length > max ? `${value.slice(0, max)}...` : value;
+}
+
+function showPanel(emptyId, bodyId, hasData) {
+  byId(emptyId).hidden = hasData;
+  byId(bodyId).hidden = !hasData;
+  return hasData;
+}
+
+function renderFailures(failures) {
+  const tokens = failures.failed_input_tokens + failures.failed_output_tokens;
+  byId("failure-cards").replaceChildren(...[
+    ["Errors", formatCount(failures.errors)],
+    ["Cut-off answers", formatCount(failures.truncated)],
+    ["Cost of failed requests", formatMoney(failures.failed_cost_usd)],
+    ["Tokens used by failed requests", formatCount(tokens),
+      `${failures.failed_input_tokens} in + ${failures.failed_output_tokens} out`],
+  ].map(cardNode));
+  if (!showPanel("failures-empty", "failures-body", failures.errors + failures.truncated > 0)) return;
+  const types = Object.keys(failures.by_type);
+  const colors = Object.fromEntries(types.map((name) => [name, "var(--error)"]));
+  const items = types.map((name) => ({ label: name, value: failures.by_type[name] }));
+  barChart(byId("chart-failures"), "Failures by type", items, colors, (value) => String(Math.round(value)));
+  byId("table-failures").tBodies[0].replaceChildren(...failures.recent.map((item) => {
+    const message = item.error_message || "";
+    return el("tr", {}, [
+      cell(formatLocalDateTime(item.created_at)), cell(item.model_name), cell(item.failure_type),
+      el("td", { title: message, class: "wrap" }, [shorten(message, 100)]),
+      cell(formatCount(item.input_tokens)), cell(formatCount(item.output_tokens)),
+    ]);
+  }));
+}
+
+function routingRow(label, count, note) {
+  return el("tr", {}, [el("th", { scope: "row" }, [label]), cell(formatCount(count)), cell(note)]);
+}
+
+function renderRouting(routing) {
+  const explicit = Object.entries(routing.explicit_by_model);
+  const hasData = routing.auto_requests > 0 || explicit.length > 0 || routing.fallbacks > 0;
+  const body = byId("table-routing").tBodies[0];
+  if (!showPanel("routing-empty", "routing-body", hasData)) {
+    body.replaceChildren();
+    return;
+  }
+  const rows = [routingRow("Requests using auto", routing.auto_requests, "")];
+  if (routing.auto_requests === 0) {
+    rows.push(el("tr", {}, [el("td", { colspan: "3" }, ["No requests used model 'auto' in this range."])]));
+  } else {
+    for (const [model, count] of Object.entries(routing.auto_by_model)) {
+      const share = formatPercent((count / routing.auto_requests) * 100);
+      rows.push(routingRow(`auto, answered by ${model}`, count, `${share} of auto`));
+    }
+  }
+  for (const [model, count] of explicit) rows.push(routingRow(`Asked for ${model} directly`, count, ""));
+  rows.push(routingRow("Fallbacks", routing.fallbacks, `${routing.fallbacks_rescued} rescued`));
+  body.replaceChildren(...rows);
+}
+
+// One bar per category, stacked by series (for example, by model).
+function stackedCategoryChart(container, title, labels, seriesByName, colors) {
+  const names = Object.keys(seriesByName);
+  const totals = labels.map((_, index) => names.reduce((sum, name) => sum + seriesByName[name][index], 0));
+  const max = Math.max(4, niceMax(Math.max(0, ...totals)));
+  const described = labels.map((label, index) => `${label}: ${totals[index]}`).join(", ");
+  const root = chartFrame(title, `${title}, answered requests per latency range. ${described}.`);
+  drawYAxis(root, max, (value) => String(Math.round(value)));
+  drawLegend(root, names.map((name) => [name, colors[name]]));
+  const slot = plotWidth() / labels.length;
+  const barWidth = Math.max(slot * 0.7, 1);
+  labels.forEach((label, index) => {
+    const x = CHART.left + index * slot + (slot - barWidth) / 2;
+    let base = 0;
+    for (const name of names) {
+      const count = seriesByName[name][index];
+      if (count <= 0) continue;
+      const yTop = yPos(base + count, max);
+      root.appendChild(svg("rect", {
+        x, y: yTop, width: barWidth, height: yPos(base, max) - yTop, style: `fill:${colors[name]}`,
+      }, [svgTitle(`${label}, ${name}: ${count}`)]));
+      base += count;
+    }
+    root.appendChild(svg("text", {
+      x: x + barWidth / 2, y: yPos(totals[index], max) - 5, "text-anchor": "middle", class: "value-label",
+    }, [String(totals[index])]));
+    root.appendChild(svg("text", {
+      x: x + barWidth / 2, y: CHART.height - CHART.bottom + 18, "text-anchor": "middle", class: "axis-label",
+    }, [label]));
+  });
+  container.replaceChildren(root);
+}
+
+function renderLatencySpread(histogram, colors) {
+  const counts = Object.values(histogram.by_model).flat();
+  const total = counts.reduce((sum, count) => sum + count, 0);
+  if (!showPanel("spread-empty", "chart-spread", total > 0)) return;
+  stackedCategoryChart(byId("chart-spread"), "Latency spread", histogram.bin_labels, histogram.by_model, colors);
+}
+
+function renderSlowest(items) {
+  if (!showPanel("slowest-empty", "slowest-body", items.length > 0)) return;
+  renderExpandableRows("table-slowest", items, (item) => [
+    cell(formatLocalDateTime(item.created_at)), cell(item.model_name), cell(item.status),
+    cell(formatMs(item.latency_ms)), cell(formatCount(item.output_tokens)),
+    el("td", { class: "wrap" }, [shorten(item.question, 80)]),
+  ], state.openSlowIds);
+}
+
+function renderInsights(insights, colors) {
+  renderFailures(insights.failures);
+  renderRouting(insights.routing);
+  renderLatencySpread(insights.latency_histogram, colors);
+  renderSlowest(insights.slowest);
+}
+
+function render(summary, series, recent, insights) {
   state.lastSummary = summary;
   byId("banner").hidden = !summary.source.toLowerCase().includes("fake");
   renderCards(summary.overall);
@@ -391,6 +521,7 @@ function render(summary, series, recent) {
   if (!empty) renderCharts(summary, series);
   renderModelTable(summary.by_model);
   renderRecent(recent.items);
+  renderInsights(insights, modelColors(Object.keys(summary.by_model)));
 }
 
 // ---------- loading ----------
@@ -403,13 +534,14 @@ async function refresh(force = false) {
   state.busy = true;
   if (force) renderCards(null);
   try {
-    const [summary, series, recent] = await Promise.all([
+    const [summary, series, recent, insights] = await Promise.all([
       api(`/api/dashboard/summary?${queryString()}`),
       api(`/api/dashboard/timeseries?${queryString()}`),
       api(`/api/dashboard/requests?${queryString({ limit: RECENT_LIMIT })}`),
+      api(`/api/dashboard/insights?${queryString()}`),
     ]);
     showError("");
-    render(summary, series, recent);
+    render(summary, series, recent, insights);
     byId("updated").textContent = `Updated ${new Date().toLocaleTimeString([], { hour12: false })}`;
   } catch (error) {
     showError(error.message);
@@ -439,15 +571,6 @@ async function loadSources() {
   return true;
 }
 
-async function loadMode() {
-  try {
-    const health = await api("/health");
-    byId("mode").textContent = `Gateway mode: ${health.mode}`;
-  } catch (error) {
-    byId("mode").textContent = "Gateway mode: unknown";
-  }
-}
-
 function saveToUrl() {
   const params = new URLSearchParams();
   if (state.source) params.set("source", state.source);
@@ -474,6 +597,7 @@ function wireControls() {
   byId("source").addEventListener("change", (event) => {
     state.source = event.target.value;
     state.openIds.clear();
+    state.openSlowIds.clear();
     saveToUrl();
     refresh(true);
   });
@@ -494,7 +618,6 @@ async function init() {
   markRange();
   wireControls();
   renderCards(null);
-  loadMode();
   try {
     if (await loadSources()) await refresh(true);
   } catch (error) {

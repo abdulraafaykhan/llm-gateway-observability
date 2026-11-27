@@ -9,7 +9,7 @@ A small web server that sits between an app and its AI models and records the co
 - **Stats.** A command reports request counts, error rate, tokens, cost, and latency at p50, p95 and p99 (p95 is the time 95% of answered requests finished under), overall and per model.
 - **Routing with fallback.** Sending `"model": "auto"` lets simple scoring rules pick the small or the big model. If the chosen model fails or its answer is cut off, the gateway retries once on the big model.
 - **Fake mode and load tests.** A simulated provider with realistic delays, failures and a limit on parallel requests, plus a script that sends traffic at a planned rate to see how the gateway behaves under a spike.
-- **Read-only dashboard.** A page at `/dashboard` that charts the request log of any database file in the data folder.
+- **Read-only dashboard and chat page.** `/dashboard` charts the request log of any database file in the data folder, including failure and routing insights; `/chat` sends messages through the gateway and shows how each was handled.
 - **Evals and offline replay.** Two labelled question sets, a grading command, a comparison of two runs, and replay commands that estimate what a router or a cascade would have scored and cost using saved answers, with no new model calls.
 
 ## How a request flows
@@ -169,7 +169,15 @@ To keep a finished run for comparison, stop the gateway and copy the file:
 Copy-Item data\fake.db data\fake_baseline_spike.db
 ```
 
-Use a file name that contains "fake" for simulated runs, so the page shows the "SIMULATED DATA" banner. The JSON behind the page is under `/api/dashboard/` (`sources`, `summary`, `timeseries`, `requests`). A before-vs-after comparison page and warnings come in a later part.
+Use a file name that contains "fake" for simulated runs, so the page shows the "SIMULATED DATA" banner. The JSON behind the page is under `/api/dashboard/` (`sources`, `summary`, `timeseries`, `requests`, `insights`).
+
+The Insights section at the bottom has four panels: failures by type (empty answer, rate limit, timeout, auth, other) with what they cost, the routing split for `auto` and explicit requests with fallback rescues, a latency spread histogram per model, and the 10 slowest answered requests.
+
+A comparison page, a Gateway page, an experiments page and warnings come in a later part.
+
+## Chat page
+
+Open http://127.0.0.1:8000/chat (the site root redirects there). Pick a model or `auto`, and send messages; the whole conversation is sent with each new message. The Inspector shows how the selected answer was handled: the model, the route reason, fallback, tokens, latency and cost. "Compare two models" sends each question on its own, without earlier messages, to two models at once and shows the answers side by side. Requests made here are recorded in the database like any other request. A navigation bar on every page links Chat and Observability and shows the gateway mode.
 
 ## API
 
@@ -227,7 +235,7 @@ app/
   repositories/   storage: the SQLite request log behind an interface
   routing/        the router interface, scoring rules and rule router
   services/       logic: chat, routing config, stats, eval, replays
-  static/         the dashboard page (plain HTML, CSS and JavaScript)
+  static/         the chat and dashboard pages and the shared navigation (plain HTML, CSS, JS)
   views/          response shapes for the API and the text reports
 config/           models, routing rules, fake-mode profiles, load questions
 eval/             the two labelled question sets
@@ -257,7 +265,6 @@ The app follows a model-view-controller layout with a service layer: models are 
 ## Roadmap (not built yet)
 
 - Exact-match cache, then a semantic cache.
-- Quality and speed warnings on the dashboard, and a before-vs-after comparison page.
-- A small chat page.
+- Quality and speed warnings, a comparison page, a Gateway page and an experiments page.
 - An assistant that answers questions about the project.
 - Rate-limit simulation in fake mode.

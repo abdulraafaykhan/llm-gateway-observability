@@ -4,9 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LLM Gateway dashboard</title>
+  <link rel="stylesheet" href="/shared/nav.css">
   <link rel="stylesheet" href="/dashboard/assets/dashboard.css">
 </head>
 <body>
+  <nav id="site-nav"></nav>
   <header class="header">
     <h1>LLM Gateway dashboard</h1>
     <div class="controls">
@@ -22,7 +24,6 @@
       </div>
       <button type="button" id="live" aria-pressed="false">Live: off</button>
       <span id="updated" class="muted" aria-live="polite">Updated -</span>
-      <span id="mode" class="chip">Gateway mode: -</span>
     </div>
   </header>
 
@@ -90,9 +91,68 @@
           </table>
         </div>
       </section>
+
+      <h2 class="section-title">Insights</h2>
+      <div class="insights">
+        <section class="panel">
+          <h3>Failures</h3>
+          <div id="failure-cards" class="cards"></div>
+          <p id="failures-empty" class="empty" hidden>No data in this range.</p>
+          <div id="failures-body">
+            <div id="chart-failures" class="chart-box"></div>
+            <div class="table-wrap">
+              <table id="table-failures">
+                <thead>
+                  <tr>
+                    <th scope="col">Time</th><th scope="col">Model</th><th scope="col">Type</th>
+                    <th scope="col">Message</th><th scope="col">Tokens in</th><th scope="col">Tokens out</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h3>Routing</h3>
+          <p id="routing-empty" class="empty" hidden>No data in this range.</p>
+          <div id="routing-body" class="table-wrap">
+            <table id="table-routing">
+              <thead>
+                <tr><th scope="col">What</th><th scope="col">Requests</th><th scope="col">Share or note</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h3>Latency spread</h3>
+          <p id="spread-empty" class="empty" hidden>No data in this range.</p>
+          <div id="chart-spread" class="chart-box"></div>
+        </section>
+
+        <section class="panel">
+          <h3>Slowest requests</h3>
+          <p id="slowest-empty" class="empty" hidden>No data in this range.</p>
+          <div id="slowest-body" class="table-wrap">
+            <table id="table-slowest">
+              <thead>
+                <tr>
+                  <th scope="col">Time</th><th scope="col">Model</th><th scope="col">Status</th>
+                  <th scope="col">Latency</th><th scope="col">Tokens out</th><th scope="col">Question</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
     </div>
   </main>
 
+  <script src="/shared/nav.js" defer></script>
   <script src="/dashboard/assets/dashboard.js"></script>
 </body>
 </html>
